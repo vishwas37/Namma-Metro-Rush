@@ -1,0 +1,8 @@
+{
+  "name": "NAMMA RUNNER: Bengaluru Metro Rush",
+  "description": "High-octane 3D endless runner through Bengaluru's Namma Metro elevated viaducts and neon underground tunnels with bilingual stations, quirky local power-ups, and procedural synth audio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
