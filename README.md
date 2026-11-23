@@ -10,11 +10,6 @@
 <div align="center">
 
   <!-- HERO WAVE BANNER -->
-  <img
-    src="https://capsule-render.vercel.app/api?type=waving&color=0:1A1423,40:5A189A,75:7B2CBF,100:FFD60A&height=250&section=header&text=NAMMA%20METRO%20RUSH&fontSize=56&fontColor=FFFDF7&fontAlignY=38&desc=BENGALURU%203D%20ENDLESS%20RUNNER%20%E2%80%A2%20ELEVATED%20VIADUCTS%20%26%20NEON%20TUNNELS&descAlignY=60&descSize=15&animation=twinkling"
-    alt="Namma Metro Rush — Bengaluru 3D Endless Runner"
-    width="100%"
-  />
 
   <!-- BILINGUAL SUBTITLE -->
   <h3>
