@@ -45,14 +45,15 @@ export function NammaRunnerLogo({ className = 'w-full max-w-[380px] h-auto' }: {
         fillOpacity="0.16"
       />
 
-      {/* Left Purple/Green metro chevron stripes */}
-      <path d="M18 82 L446 74 L443 85 L15 93 Z" fill="#FFD60A" fillOpacity="0.95" />
+      {/* Karnataka Yellow & Crimson Red (ಹಳದಿ-ಕೆಂಪು) pride stripes */}
+      <path d="M18 75 L448 67 L446 77 L16 85 Z" fill="#FFD60A" />
+      <path d="M16 84 L446 76 L444 86 L14 94 Z" fill="#DC2626" />
 
       {/* Title Wordmark — generous width inside 476 viewBox, zero clipping */}
-      <g transform="rotate(-1.3 236 56)">
+      <g transform="rotate(-1.3 236 52)">
         <text
           x="236"
-          y="68"
+          y="63"
           textAnchor="middle"
           fontFamily="'Titan One', cursive, sans-serif"
           fontSize="39"
@@ -68,7 +69,7 @@ export function NammaRunnerLogo({ className = 'w-full max-w-[380px] h-auto' }: {
         </text>
         <text
           x="236"
-          y="68"
+          y="63"
           textAnchor="middle"
           fontFamily="'Titan One', cursive, sans-serif"
           fontSize="39"
@@ -83,30 +84,32 @@ export function NammaRunnerLogo({ className = 'w-full max-w-[380px] h-auto' }: {
         </text>
       </g>
 
-      {/* Subtitle badge */}
-      <g transform="translate(88, 92) rotate(-1)">
-        <rect x="3" y="4" width="300" height="32" rx="10" fill="#1A1423" />
+      {/* Bilingual Kannada + English Subtitle badge with Karnataka Yellow/Red border */}
+      <g transform="translate(58, 92) rotate(-1)">
+        <rect x="3" y="4" width="360" height="34" rx="10" fill="#1A1423" />
         <rect
           x="0"
           y="0"
-          width="300"
-          height="32"
+          width="360"
+          height="34"
           rx="10"
           fill="#1A1423"
           stroke="#FFD60A"
           strokeWidth="3"
         />
+        <rect x="4" y="4" width="10" height="13" rx="3" fill="#FFD60A" />
+        <rect x="4" y="17" width="10" height="13" rx="3" fill="#DC2626" />
         <text
-          x="150"
-          y="21"
+          x="185"
+          y="22"
           textAnchor="middle"
-          fontFamily="'Fredoka', sans-serif"
+          fontFamily="'Noto Sans Kannada', 'Fredoka', sans-serif"
           fontWeight="700"
-          fontSize="14.5"
-          letterSpacing="2.2"
+          fontSize="14"
+          letterSpacing="1.1"
           fill="#FFFFFF"
         >
-          BENGALURU METRO RUSH
+          ನಮ್ಮ ರನ್ನರ್ · BENGALURU METRO
         </text>
       </g>
     </svg>

@@ -39,6 +39,11 @@ import {
   type RunnerAction,
   type SupportBox,
 } from '../core/simulation';
+import {
+  pickVoiceOverPhrase,
+  type VoiceOverEvent,
+  type VoiceOverPhrase,
+} from '../core/voiceOver';
 import { SoundEngine } from './sound';
 import {
   buildChaserRig,
@@ -70,6 +75,11 @@ export interface CalloutToast {
   color: string;
 }
 
+export interface ActiveVoiceOver {
+  id: number;
+  phrase: VoiceOverPhrase;
+}
+
 export interface HudState {
   mode: GameMode;
   score: number;
@@ -87,9 +97,28 @@ export interface HudState {
   kaapiActive: boolean;
   chaserClose: boolean;
   callout: CalloutToast | null;
+  voiceOver: ActiveVoiceOver | null;
   lastStationName: string;
   gameOverQuip: string;
   runSummary: RunSummary | null;
+}
+
+export interface RunnerEngine {
+  updateProfile(profile: PlayerProfile): void;
+  triggerLobbyWave(): void;
+  startRun(): void;
+  returnToTitle(): void;
+  pause(): void;
+  resume(): void;
+  queueAction(action: RunnerAction): void;
+  activateHoverboard(): void;
+  dispose(): void;
+}
+
+export interface AcquiredWebGL2 {
+  canvas: HTMLCanvasElement;
+  context: WebGL2RenderingContext;
+  antialias: boolean;
 }
 
 interface ActiveHazard extends HazardCollider {
@@ -156,26 +185,66 @@ const _colScratch = new THREE.Color();
 const _targetSky = new THREE.Color();
 const _targetFog = new THREE.Color();
 const _elevatedSky = new THREE.Color(0x69c7f8);
-const _blossomSky = new THREE.Color(0x88c9f9);
-const _drizzleSky = new THREE.Color(0x526b8c);
+const _lightRainSky = new THREE.Color(0x6888ab);
+const _heavyMonsoonSky = new THREE.Color(0x283a54);
 const _undergroundSky = new THREE.Color(0x0d081a);
 
-function detectSoftwareGl(): boolean {
+function readWeatherOverride(): WeatherMode | null {
+  if (typeof window === 'undefined') return null;
+  const w = new URLSearchParams(window.location.search).get('weather');
+  if (w === 'sunny' || w === 'light_rain' || w === 'heavy_monsoon') return w;
+  return null;
+}
+
+function isSoftwareContext(gl: WebGLRenderingContext | WebGL2RenderingContext | null): boolean {
+  if (!gl) return true;
   try {
-    const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-    if (!gl) return true;
     const ext = gl.getExtension('WEBGL_debug_renderer_info');
     const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
     const gpu = String(gl.getParameter(param) ?? '');
-    gl.getExtension('WEBGL_lose_context')?.loseContext();
     return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
   } catch {
-    return true;
+    return false;
   }
 }
 
-export class MetroRunnerEngine {
+/**
+ * Acquires a WebGL2 context directly on a fresh canvas BEFORE instantiating
+ * THREE.WebGLRenderer so broken Mesa/ANGLE/llvmpipe drivers (e.g. BindToCurrentSequence
+ * failures) never trigger Three.js's internal console.error spam and can cleanly fall
+ * back to Canvas2DRunnerEngine.
+ */
+export function acquireWebGL2Context(preferAntialias: boolean): AcquiredWebGL2 | null {
+  if (typeof document === 'undefined') return null;
+
+  const attempts: Array<{ antialias: boolean; powerPreference?: WebGLPowerPreference }> = [
+    { antialias: preferAntialias, powerPreference: 'default' },
+    { antialias: false },
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const canvas = document.createElement('canvas');
+      const attrs: WebGLContextAttributes = {
+        antialias: attempt.antialias,
+        alpha: false,
+        depth: true,
+        stencil: false,
+        failIfMajorPerformanceCaveat: false,
+        ...(attempt.powerPreference ? { powerPreference: attempt.powerPreference } : {}),
+      };
+      const gl = canvas.getContext('webgl2', attrs) as WebGL2RenderingContext | null;
+      if (gl && !gl.isContextLost()) {
+        return { canvas, context: gl, antialias: attempt.antialias };
+      }
+    } catch {
+      // Quietly proceed to fallback attempt
+    }
+  }
+  return null;
+}
+
+export class MetroRunnerEngine implements RunnerEngine {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
@@ -198,6 +267,7 @@ export class MetroRunnerEngine {
   private profile: PlayerProfile;
 
   private trackSegments: THREE.Group[] = [];
+  private deckMat: THREE.MeshStandardMaterial | null = null;
   private tunnelRings: THREE.Group[] = [];
   private sceneryChunks: THREE.Group[] = [];
   private clouds: THREE.Group[] = [];
@@ -216,6 +286,7 @@ export class MetroRunnerEngine {
 
   private weatherMesh: THREE.InstancedMesh;
   private weatherDrops: WeatherDrop[] = [];
+  private weatherOverride: WeatherMode | null = readWeatherOverride();
 
   private mode: GameMode = 'title';
   private score = 0;
@@ -247,6 +318,7 @@ export class MetroRunnerEngine {
   private crashDelayTimer = 0;
   private cameraTrauma = 0;
   private chaserTimer = 4.2;
+  private stumbleGraceTimer = 0;
   private lobbyHopTimer = 0;
 
   private stationBannerTimer = 0;
@@ -254,6 +326,10 @@ export class MetroRunnerEngine {
   private callout: CalloutToast | null = null;
   private calloutTimer = 0;
   private calloutSeq = 1;
+  private activeVoiceOver: ActiveVoiceOver | null = null;
+  private voiceOverTimer = 0;
+  private voiceOverSeq = 1;
+  private lastVoiceOverByEvent: Partial<Record<VoiceOverEvent, string>> = {};
 
   private kaapiTimer = 0;
   private kaapiDuration = 5.5;
@@ -277,6 +353,7 @@ export class MetroRunnerEngine {
     sound: SoundEngine,
     onHud: (hud: HudState) => void,
     onRunEnd: (summary: RunSummary) => void,
+    preAcquiredWebGL?: AcquiredWebGL2,
   ) {
     this.container = container;
     this.profile = profile;
@@ -285,16 +362,27 @@ export class MetroRunnerEngine {
     this.sound = sound;
     this.onHud = onHud;
     this.onRunEnd = onRunEnd;
-    this.isSoftwareGl = detectSoftwareGl();
 
     const w = Math.max(1, container.clientWidth || window.innerWidth);
     const h = Math.max(1, container.clientHeight || window.innerHeight);
     this.framing = computeCameraFraming(w, h);
 
+    const webgl = preAcquiredWebGL ?? acquireWebGL2Context(profile.quality === 'high');
+    if (!webgl) {
+      throw new Error('WebGL2 context unavailable on this device.');
+    }
+
     this.renderer = new THREE.WebGLRenderer({
-      antialias: !this.isSoftwareGl && profile.quality === 'high',
-      powerPreference: 'high-performance',
+      canvas: webgl.canvas,
+      context: webgl.context,
+      antialias: webgl.antialias,
+      alpha: false,
+      depth: true,
+      stencil: false,
+      powerPreference: 'default',
+      failIfMajorPerformanceCaveat: false,
     });
+    this.isSoftwareGl = isSoftwareContext(this.renderer.getContext());
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.12;
@@ -398,11 +486,11 @@ export class MetroRunnerEngine {
     }
     this.scene.add(this.particleMesh);
 
-    // Weather particles (Tabebuia petals & Bengaluru evening drizzle)
-    const wCount = 96;
+    // Weather rain particle pool (Light Rain & Heavy Monsoon)
+    const wCount = 220;
     this.weatherMesh = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(0.14, 0.42, 0.08),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.78 }),
+      new THREE.BoxGeometry(0.11, 0.56, 0.08),
+      new THREE.MeshBasicMaterial({ color: 0xdbeafe, transparent: true, opacity: 0.78 }),
       wCount,
     );
     this.weatherMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -413,7 +501,7 @@ export class MetroRunnerEngine {
         x: (Math.random() - 0.5) * 32,
         y: Math.random() * 18,
         z: -Math.random() * 55 + 8,
-        vy: -5 - Math.random() * 6,
+        vy: -7 - Math.random() * 6,
         rot: Math.random() * Math.PI * 2,
       });
     }
@@ -448,8 +536,18 @@ export class MetroRunnerEngine {
       roughness: 0.72,
       metalness: 0.14,
     });
+    this.deckMat = deckMat;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.72 });
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0x7b2cbf, roughness: 0.35, metalness: 0.2 });
+    const trimPurpleMat = new THREE.MeshStandardMaterial({ color: 0x7b2cbf, roughness: 0.35, metalness: 0.2 });
+    const trimYellowMat = new THREE.MeshStandardMaterial({ color: 0xffd60a, roughness: 0.35, metalness: 0.15 });
+    const trimRedMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.38, metalness: 0.15 });
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.45, metalness: 0.6 });
+    const flagMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: this.textures.kannadaFlag,
+      roughness: 0.45,
+      side: THREE.DoubleSide,
+    });
     const pierMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.85 });
 
     for (let i = 0; i < 8; i++) {
@@ -460,11 +558,25 @@ export class MetroRunnerEngine {
       seg.add(deck);
 
       for (const sx of [-5.85, 5.85]) {
-        const rail = new THREE.Mesh(new THREE.BoxGeometry(0.42, 1.05, segLen), wallMat);
-        rail.position.set(sx, 0.35, 0);
-        const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.22, segLen), trimMat);
-        stripe.position.set(sx, 0.65, 0);
-        seg.add(rail, stripe);
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(0.42, 1.08, segLen), wallMat);
+        rail.position.set(sx, 0.36, 0);
+        const stripeYellow = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.16, segLen), trimYellowMat);
+        stripeYellow.position.set(sx, 0.8, 0);
+        const stripeRed = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.16, segLen), trimRedMat);
+        stripeRed.position.set(sx, 0.64, 0);
+        const stripePurple = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.14, segLen), trimPurpleMat);
+        stripePurple.position.set(sx, 0.48, 0);
+        seg.add(rail, stripeYellow, stripeRed, stripePurple);
+
+        // Festive Karnataka Yellow-Red flag pennants along the elevated viaduct
+        if (i % 2 === 0) {
+          const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 3.1, 8), poleMat);
+          pole.position.set(sx, 2.35, 0);
+          const flag = new THREE.Mesh(new THREE.PlaneGeometry(1.55, 0.96), flagMat);
+          flag.position.set(sx + (sx > 0 ? 0.78 : -0.78), 3.3, 0);
+          flag.rotation.y = sx > 0 ? -0.25 : 0.25;
+          seg.add(pole, flag);
+        }
       }
 
       const pier = new THREE.Mesh(new THREE.BoxGeometry(2.6, 14, 2.2), pierMat);
@@ -572,18 +684,80 @@ export class MetroRunnerEngine {
         chunk.add(bldg);
       }
 
-      const msg = BILLBOARDS[i % BILLBOARDS.length];
+      // BIGGER, FUNNIER PEAK BENGALURU ROADSIDE BILLBOARDS (12.4 x 6.2 units on twin steel pillars!)
+      const ad = BILLBOARDS[i % BILLBOARDS.length];
       const bSide = i % 2 === 0 ? -1 : 1;
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.3, 12.5, 8), poleMat);
-      pole.position.set(bSide * 10.6, -1.5, 2);
-      const boardTex = this.textures.createBillboard(msg.headline, msg.sub, msg.bg, msg.accent);
-      const board = new THREE.Mesh(
-        new THREE.BoxGeometry(6.8, 3.4, 0.32),
-        new THREE.MeshStandardMaterial({ color: 0xffffff, map: boardTex, roughness: 0.38 }),
-      );
-      board.position.set(bSide * 10.2, 5.4, 2);
-      board.rotation.y = bSide > 0 ? -0.34 : 0.34;
-      chunk.add(pole, board);
+      const frameMat = new THREE.MeshStandardMaterial({ color: 0x1a1423, roughness: 0.55, metalness: 0.3 });
+
+      const billboardGroup = new THREE.Group();
+      billboardGroup.position.set(bSide * 12.2, 0, 2.5);
+      billboardGroup.rotation.y = bSide > 0 ? -0.42 : 0.42;
+
+      const pillarL = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.36, 13.0, 8), poleMat);
+      pillarL.position.set(-3.8, -3.0, -0.46);
+      const pillarR = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.36, 13.0, 8), poleMat);
+      pillarR.position.set(3.8, -3.0, -0.46);
+
+      const boardTex = this.textures.createBillboard(ad);
+      const boardFaceMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        map: boardTex,
+        roughness: 0.45,
+        emissive: 0xffffff,
+        emissiveMap: boardTex,
+        emissiveIntensity: 0.08,
+      });
+      const board = new THREE.Mesh(new THREE.BoxGeometry(12.4, 6.2, 0.42), [
+        frameMat,
+        frameMat,
+        frameMat,
+        frameMat,
+        boardFaceMat,
+        boardFaceMat,
+      ]);
+      board.position.set(0, 6.4, 0);
+      billboardGroup.add(pillarL, pillarR, board);
+      chunk.add(billboardGroup);
+
+      // GIANT OVERHEAD VIADUCT ARCHES & FUNNY SKY-GANTRY ADS (safely above drone & jump height!)
+      if (i % 2 === 1) {
+        const isKannadaArch = i % 4 === 1;
+        const archPillarMat = new THREE.MeshStandardMaterial({
+          color: isKannadaArch ? 0xdc2626 : 0x334155,
+          roughness: 0.48,
+          metalness: 0.32,
+        });
+        const archTrimMat = new THREE.MeshStandardMaterial({ color: 0xffd60a, roughness: 0.38 });
+        for (const px of [-6.45, 6.45]) {
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.68, 9.2, 0.68), archPillarMat);
+          post.position.set(px, 4.0, -12);
+          const band = new THREE.Mesh(new THREE.BoxGeometry(0.78, 1.0, 0.78), archTrimMat);
+          band.position.set(px, 5.8, -12);
+          chunk.add(post, band);
+        }
+
+        const overheadTex = isKannadaArch
+          ? this.textures.kannadaArchSign
+          : this.textures.createBillboard(BILLBOARDS[(i + 4) % BILLBOARDS.length]);
+        const overheadFace = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          map: overheadTex,
+          roughness: 0.44,
+          emissive: 0xffffff,
+          emissiveMap: overheadTex,
+          emissiveIntensity: 0.08,
+        });
+        const overheadBoard = new THREE.Mesh(new THREE.BoxGeometry(14.4, 4.3, 0.48), [
+          frameMat,
+          frameMat,
+          frameMat,
+          frameMat,
+          overheadFace,
+          overheadFace,
+        ]);
+        overheadBoard.position.set(0, 10.75, -12);
+        chunk.add(overheadBoard);
+      }
 
       chunk.position.z = 10 - i * spacing;
       this.scene.add(chunk);
@@ -682,7 +856,7 @@ export class MetroRunnerEngine {
 
     this.zone = 'elevated';
     this.spawnedZone = 'elevated';
-    this.weather = 'sunny';
+    this.weather = this.weatherOverride ?? 'sunny';
     this.sound.setUnderground(false);
     this.elevatedIdx = 0;
     this.undergroundIdx = 0;
@@ -695,10 +869,13 @@ export class MetroRunnerEngine {
     this.hoverboardTimer = 0;
     this.hoverboardCooldown = 0;
     this.chaserTimer = 4.2;
+    this.stumbleGraceTimer = 0;
     this.stationBannerTimer = 0;
     this.activeStationBanner = null;
     this.callout = null;
     this.calloutTimer = 0;
+    this.activeVoiceOver = null;
+    this.voiceOverTimer = 0;
 
     this.runnerRig.root.position.set(0, 0, 0);
     this.runnerRig.root.rotation.set(0, 0, 0);
@@ -720,6 +897,7 @@ export class MetroRunnerEngine {
 
     this.sound.startMusic();
     this.triggerStationBanner(ELEVATED_STATIONS[0], false);
+    this.triggerVoiceOver('run_start');
     this.pushHud(true);
   }
 
@@ -728,6 +906,8 @@ export class MetroRunnerEngine {
     this.mode = 'title';
     this.sound.stopMusic();
     this.sound.cancelSpeech();
+    this.activeVoiceOver = null;
+    this.voiceOverTimer = 0;
     this.player = createInitialPlayerKinematics();
     this.zone = 'elevated';
     this.weather = 'sunny';
@@ -776,12 +956,22 @@ export class MetroRunnerEngine {
     this.sound.playAutoHorn();
     this.spawnBurst(this.player.x, this.player.y + 0.4, 0, 0xffd60a, 16);
     this.showCallout('AUTO BOARD ON! PEE-PEE!', '#FFD60A');
+    this.triggerVoiceOver('hoverboard');
     this.pushHud(true);
   }
 
   private showCallout(text: string, color: string): void {
     this.callout = { id: this.calloutSeq++, text, color };
     this.calloutTimer = 1.2;
+    this.pushHud(true);
+  }
+
+  private triggerVoiceOver(event: VoiceOverEvent): void {
+    const phrase = pickVoiceOverPhrase(event, this.lastVoiceOverByEvent[event]);
+    this.lastVoiceOverByEvent[event] = phrase.id;
+    this.activeVoiceOver = { id: this.voiceOverSeq++, phrase };
+    this.voiceOverTimer = 3.2;
+    this.sound.playVoiceOver(phrase);
     this.pushHud(true);
   }
 
@@ -869,10 +1059,37 @@ export class MetroRunnerEngine {
     this.powerUps.push({ mesh, type, lane, y, z, collected: false });
   }
 
-  private spawnHazard(kind: HazardKind, lane: number, zCenter: number): void {
-    const id = this.nextEntityId++;
+  /**
+   * Prevents overlapping trains in the same lane AND prevents faster moving trains
+   * from overtaking and clipping straight through static trains or barriers ahead!
+   */
+  private canSpawnInLane(lane: number, zStart: number, zEnd: number, isMoving: boolean): boolean {
+    const pad = 16;
+    for (let i = 0; i < this.hazards.length; i++) {
+      const other = this.hazards[i];
+      if (other.lane !== lane) continue;
+
+      // Direct Z-interval overlap with safety margin
+      if (zStart + pad >= other.zEnd && zEnd - pad <= other.zStart) {
+        return false;
+      }
+
+      // If we are spawning a fast moving train behind a slower hazard in the same lane,
+      // it would overtake and pass through it before reaching the player!
+      if (isMoving && other.speedOffset === 0 && other.zEnd > zStart - 110) {
+        return false;
+      }
+
+      // Conversely, don't spawn a static hazard in front of a moving train already rushing down this lane
+      if (!isMoving && other.speedOffset > 0 && other.zStart < zEnd + 110) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private spawnHazard(kind: HazardKind, lane: number, zCenter: number): boolean {
     const line: 'purple' | 'green' = Math.random() < 0.62 ? 'purple' : 'green';
-    let mesh: THREE.Group;
     let length = 1.2;
     let height = 1.35;
     let speedOffset = 0;
@@ -884,16 +1101,27 @@ export class MetroRunnerEngine {
       height = TRAIN_ROOF_Y;
       const hasRamp = kind === 'train_ramp';
       rampLength = hasRamp ? 5.4 : undefined;
-      speedOffset = kind === 'train_moving' ? 12.5 : 0;
-      mesh = buildTrainMesh(line, length, hasRamp, this.textures);
+      speedOffset = kind === 'train_moving' ? 11.5 : 0;
     } else {
-      mesh = buildObstacleMesh(kind, this.textures);
       length = 0.8;
       if (kind === 'gantry_low') {
         height = 3.2;
         clearanceBottomY = 1.3;
       }
     }
+
+    const zStart = zCenter + length / 2 + (rampLength ?? 0);
+    const zEnd = zCenter - length / 2;
+
+    if (!this.canSpawnInLane(lane, zStart, zEnd, speedOffset > 0)) {
+      return false;
+    }
+
+    const id = this.nextEntityId++;
+    const mesh =
+      kind === 'train_static' || kind === 'train_ramp' || kind === 'train_moving'
+        ? buildTrainMesh(line, length, kind === 'train_ramp', this.textures)
+        : buildObstacleMesh(kind, this.textures);
 
     mesh.position.set(LANE_POSITIONS[lane], 0, zCenter);
     this.scene.add(mesh);
@@ -902,8 +1130,10 @@ export class MetroRunnerEngine {
       id,
       kind,
       lane,
-      zStart: zCenter + length / 2 + (rampLength ?? 0),
-      zEnd: zCenter - length / 2,
+      zStart,
+      zEnd,
+      prevZStart: zStart,
+      prevZEnd: zEnd,
       height,
       clearanceBottomY,
       rampLength,
@@ -911,6 +1141,7 @@ export class MetroRunnerEngine {
       speedOffset,
       active: true,
     });
+    return true;
   }
 
   private spawnNextWave(): void {
@@ -920,19 +1151,24 @@ export class MetroRunnerEngine {
     const otherLanes = lanes.filter((l) => l !== openLane);
 
     const roll = Math.random();
-    if (roll < 0.34) {
+    if (roll < 0.36) {
       const rampLane = otherLanes[0];
-      this.spawnHazard('train_ramp', rampLane, z - 12);
-      this.spawnTokenLine(rampLane, z - 2, 6, TRAIN_ROOF_Y + 0.9, 3.0);
+      if (this.spawnHazard('train_ramp', rampLane, z - 12)) {
+        this.spawnTokenLine(rampLane, z - 2, 6, TRAIN_ROOF_Y + 0.9, 3.0);
+      }
       if (Math.random() < 0.6) {
-        this.spawnHazard('train_static', otherLanes[1], z - 24);
-        this.spawnTokenLine(otherLanes[1], z - 16, 4, TRAIN_ROOF_Y + 0.9, 3.0);
+        if (this.spawnHazard('train_static', otherLanes[1], z - 24)) {
+          this.spawnTokenLine(otherLanes[1], z - 16, 4, TRAIN_ROOF_Y + 0.9, 3.0);
+        }
       } else {
         this.spawnHazard('barricade_bbmp', openLane, z - 8);
         this.spawnTokenLine(openLane, z - 4, 5, 1.1, 2.4, 2.0);
       }
-    } else if (roll < 0.65) {
-      this.spawnHazard('train_moving', otherLanes[0], z - 26);
+    } else if (roll < 0.68) {
+      if (!this.spawnHazard('train_moving', otherLanes[0], z - 26)) {
+        // Fallback to clean static train if lane has a slower train ahead
+        this.spawnHazard('train_static', otherLanes[0], z - 20);
+      }
       this.spawnHazard('gantry_low', otherLanes[1], z - 6);
       this.spawnTokenLine(openLane, z - 2, 6, 1.1, 2.8);
     } else {
@@ -951,7 +1187,7 @@ export class MetroRunnerEngine {
       this.spawnTokenLine(Math.floor(Math.random() * 3), z - 2, 7, DRONE_FLIGHT_Y + 0.8, 3.0, 0.8);
     }
 
-    this.nextWaveZ -= Math.max(24, 34 - this.distance * 0.005);
+    this.nextWaveZ -= Math.max(28, 36 - this.distance * 0.004);
   }
 
   private spawnStationAhead(): void {
@@ -1037,10 +1273,15 @@ export class MetroRunnerEngine {
     }
 
     if (this.chaserTimer > 0) this.chaserTimer = Math.max(0, this.chaserTimer - dt);
+    if (this.stumbleGraceTimer > 0) this.stumbleGraceTimer = Math.max(0, this.stumbleGraceTimer - dt);
     if (this.stationBannerTimer > 0) this.stationBannerTimer = Math.max(0, this.stationBannerTimer - dt);
     if (this.calloutTimer > 0) {
       this.calloutTimer = Math.max(0, this.calloutTimer - dt);
       if (this.calloutTimer <= 0) this.callout = null;
+    }
+    if (this.voiceOverTimer > 0) {
+      this.voiceOverTimer = Math.max(0, this.voiceOverTimer - dt);
+      if (this.voiceOverTimer <= 0) this.activeVoiceOver = null;
     }
 
     const speed = getRunSpeed(this.distance, this.kaapiTimer > 0);
@@ -1134,6 +1375,8 @@ export class MetroRunnerEngine {
     const supports: SupportBox[] = [];
     for (let i = this.hazards.length - 1; i >= 0; i--) {
       const h = this.hazards[i];
+      h.prevZStart = h.zStart;
+      h.prevZEnd = h.zEnd;
       const moveZ = dz + h.speedOffset * dt;
       h.mesh.position.z += moveZ;
       h.zStart += moveZ;
@@ -1158,18 +1401,34 @@ export class MetroRunnerEngine {
       }
     }
 
-    const prevLane = this.player.lane;
-    const ev = stepPlayerPhysics(this.player, dt, supports);
+    const ev = stepPlayerPhysics(this.player, dt, supports, this.weather);
     if (ev.switchedLane !== 0) {
       this.sound.haptic(8);
       this.sound.playWhoosh(ev.switchedLane > 0 ? 1.08 : 0.94);
+      if (this.weather === 'heavy_monsoon' && this.player.grounded) {
+        this.spawnBurst(this.player.x, this.player.y + 0.14, 0, 0x93c5fd, 8);
+      }
     }
     if (ev.jumped) {
       this.sound.playJump();
-      this.spawnBurst(this.player.x, this.player.y + 0.1, 0, 0xffffff, 5);
+      this.spawnBurst(
+        this.player.x,
+        this.player.y + 0.1,
+        0,
+        this.weather === 'heavy_monsoon' ? 0xbae6fd : 0xffffff,
+        6,
+      );
     }
     if (ev.slammed || ev.rolled) this.sound.playRoll();
-    if (ev.landed) this.spawnBurst(this.player.x, this.player.y + 0.08, 0, 0xcbd5e1, 5);
+    if (ev.landed) {
+      this.spawnBurst(
+        this.player.x,
+        this.player.y + 0.08,
+        0,
+        this.weather === 'heavy_monsoon' ? 0x93c5fd : 0xcbd5e1,
+        this.weather === 'heavy_monsoon' ? 9 : 5,
+      );
+    }
 
     const invincible = this.kaapiTimer > 0 || this.droneTimer > 0;
     for (let i = this.hazards.length - 1; i >= 0; i--) {
@@ -1202,7 +1461,7 @@ export class MetroRunnerEngine {
         this.cameraTrauma = 0.72;
         this.sound.playAutoHorn();
         this.spawnBurst(this.player.x, this.player.y + 1.1, 0, 0xffd60a, 24);
-        this.showCallout('AUTO SHIELD SAVED YOU!', '#2DC653');
+        this.showCallout('ಆಟೋ ಶೀಲ್ಡ್! AUTO SHIELD SAVED YOU!', '#2DC653');
         for (let j = this.hazards.length - 1; j >= 0; j--) {
           if (this.hazards[j].zEnd > -26 && this.hazards[j].zStart < 12) {
             this.scene.remove(this.hazards[j].mesh);
@@ -1212,13 +1471,27 @@ export class MetroRunnerEngine {
         }
         break;
       } else if (outcome === 'stumble') {
-        h.active = false;
+        if (this.stumbleGraceTimer > 0) continue;
+        // CRITICAL FIX: NEVER disable the train collider! Push the runner cleanly
+        // back to the safe adjacent lane outside the train wall so you NEVER pass through trains.
+        const trainX = LANE_POSITIONS[h.lane];
+        const pushDir = this.player.x < trainX ? -1 : 1;
+        let safeLane = Math.max(0, Math.min(2, h.lane + pushDir));
+        if (safeLane === h.lane) {
+          safeLane = this.player.lastSafeLane !== h.lane ? this.player.lastSafeLane : h.lane === 0 ? 1 : 0;
+        }
+        this.player.lane = safeLane;
+        this.player.lastSafeLane = safeLane;
+        this.player.x = trainX + (safeLane < h.lane ? -1.85 : 1.85);
+        this.player.bufferedAction = 'none';
+        this.player.bufferTimer = 0;
+        this.stumbleGraceTimer = 0.28;
         this.chaserTimer = STUMBLE_CHASE_WINDOW;
         this.cameraTrauma = 0.55;
         this.hitstopTimer = 0.04;
         this.sound.playStumble();
-        this.player.lane = prevLane;
-        this.showCallout('INSPECTOR ON YOUR TAIL!', '#FF70A6');
+        this.spawnBurst(this.player.x, this.player.y + 1.0, 0, 0xdc2626, 12);
+        this.showCallout('ಹುಷಾರು! INSPECTOR ON YOUR TAIL!', '#FFD60A');
       } else if (outcome === 'crash') {
         this.triggerCrash();
         break;
@@ -1287,7 +1560,24 @@ export class MetroRunnerEngine {
       }
     }
 
-    this.weather = getWeatherForDistance(this.distance, this.zone);
+    const nextWeather =
+      this.zone === 'underground'
+        ? 'sunny'
+        : this.weatherOverride ?? getWeatherForDistance(this.distance, this.zone);
+    if (nextWeather !== this.weather) {
+      this.weather = nextWeather;
+      if (nextWeather === 'heavy_monsoon') {
+        this.showCallout('HEAVY MONSOON! SLIPPERY TRACK!', '#38BDF8');
+      } else if (nextWeather === 'light_rain') {
+        this.showCallout('LIGHT RAIN · ಸಣ್ಣ ಮಳೆ', '#93C5FD');
+      } else {
+        this.showCallout('SUNNY SKIES · ಬಿಸಿಲು', '#FFD60A');
+      }
+      this.pushHud(true);
+    }
+    if (this.weather === 'heavy_monsoon' && this.player.grounded && Math.random() < 0.38) {
+      this.spawnBurst(this.player.x, this.player.y + 0.08, 0.2, 0xbae6fd, 1);
+    }
     this.updateAtmosphere(dt);
     this.updateWeatherParticles(dt, dz);
     this.updateRunnerAnim(dt, speed);
@@ -1321,6 +1611,7 @@ export class MetroRunnerEngine {
       this.showCallout('STARTUP DRONE FLIGHT!', '#00F5D4');
       this.spawnTokenLine(1, -22, 10, DRONE_FLIGHT_Y + 0.8, 3.4, 1.0);
     }
+    this.triggerVoiceOver(type);
     this.pushHud(true);
   }
 
@@ -1404,12 +1695,12 @@ export class MetroRunnerEngine {
     if (isUg) {
       _targetSky.copy(_undergroundSky);
       _targetFog.setHex(0x140d29);
-    } else if (this.weather === 'drizzle') {
-      _targetSky.copy(_drizzleSky);
-      _targetFog.setHex(0x647d9e);
-    } else if (this.weather === 'blossom') {
-      _targetSky.copy(_blossomSky);
-      _targetFog.setHex(0xfbcfe8);
+    } else if (this.weather === 'heavy_monsoon') {
+      _targetSky.copy(_heavyMonsoonSky);
+      _targetFog.setHex(0x334968);
+    } else if (this.weather === 'light_rain') {
+      _targetSky.copy(_lightRainSky);
+      _targetFog.setHex(0x89a8c9);
     } else {
       _targetSky.copy(_elevatedSky);
       _targetFog.setHex(0x88d4fc);
@@ -1418,47 +1709,77 @@ export class MetroRunnerEngine {
     const alpha = 1 - Math.exp(-2.8 * dt);
     (this.scene.background as THREE.Color).lerp(_targetSky, alpha);
     this.fog.color.lerp(_targetFog, alpha);
-    this.fog.near = THREE.MathUtils.damp(this.fog.near, isUg ? 24 : 48, 3, dt);
-    this.fog.far = THREE.MathUtils.damp(this.fog.far, isUg ? 115 : 175, 3, dt);
-    this.sunLight.intensity = THREE.MathUtils.damp(
-      this.sunLight.intensity,
-      isUg ? 0.35 : this.weather === 'drizzle' ? 1.25 : 1.85,
+    this.fog.near = THREE.MathUtils.damp(
+      this.fog.near,
+      isUg ? 24 : this.weather === 'heavy_monsoon' ? 28 : 48,
       3,
       dt,
     );
-    this.hemiLight.intensity = THREE.MathUtils.damp(this.hemiLight.intensity, isUg ? 0.72 : 1.08, 3, dt);
+    this.fog.far = THREE.MathUtils.damp(
+      this.fog.far,
+      isUg ? 115 : this.weather === 'heavy_monsoon' ? 128 : 175,
+      3,
+      dt,
+    );
+    this.sunLight.intensity = THREE.MathUtils.damp(
+      this.sunLight.intensity,
+      isUg ? 0.35 : this.weather === 'heavy_monsoon' ? 0.85 : this.weather === 'light_rain' ? 1.35 : 1.85,
+      3,
+      dt,
+    );
+    this.hemiLight.intensity = THREE.MathUtils.damp(
+      this.hemiLight.intensity,
+      isUg ? 0.72 : this.weather === 'heavy_monsoon' ? 0.82 : 1.08,
+      3,
+      dt,
+    );
     this.tunnelLight.intensity = THREE.MathUtils.damp(this.tunnelLight.intensity, isUg ? 3.2 : 0, 4, dt);
     this.tunnelLight.position.set(this.player.x, 5.2, -5);
+
+    if (this.deckMat) {
+      const targetRoughness =
+        this.weather === 'heavy_monsoon' ? 0.24 : this.weather === 'light_rain' ? 0.48 : 0.72;
+      const targetMetalness =
+        this.weather === 'heavy_monsoon' ? 0.36 : this.weather === 'light_rain' ? 0.22 : 0.14;
+      this.deckMat.roughness = THREE.MathUtils.damp(this.deckMat.roughness, targetRoughness, 3.5, dt);
+      this.deckMat.metalness = THREE.MathUtils.damp(this.deckMat.metalness, targetMetalness, 3.5, dt);
+    }
   }
 
   private updateWeatherParticles(dt: number, dz: number): void {
-    const show = this.zone === 'elevated' && (this.weather === 'blossom' || this.weather === 'drizzle');
+    const show =
+      this.zone === 'elevated' &&
+      (this.weather === 'light_rain' || this.weather === 'heavy_monsoon');
     this.weatherMesh.visible = show;
     if (!show) return;
 
-    const isBlossom = this.weather === 'blossom';
-    _colScratch.setHex(isBlossom ? 0xff70a6 : 0xbae6fd);
-    for (let i = 0; i < this.weatherDrops.length; i++) {
-      const wp = this.weatherDrops[i];
-      wp.y += (isBlossom ? wp.vy * 0.45 : wp.vy * 3.1) * dt;
-      wp.x += (isBlossom ? Math.sin(this.elapsed * 2 + i) * 2.2 : -3.8) * dt;
-      wp.z += dz * 0.6;
-      wp.rot += dt * (isBlossom ? 4.2 : 0);
+    const isMonsoon = this.weather === 'heavy_monsoon';
+    const activeCount = isMonsoon ? this.weatherDrops.length : Math.floor(this.weatherDrops.length * 0.36);
+    _colScratch.setHex(isMonsoon ? 0xbae6fd : 0xe0f2fe);
 
-      if (wp.y < -1 || wp.z > 10) {
-        wp.x = (Math.random() - 0.5) * 30;
-        wp.y = 14 + Math.random() * 8;
-        wp.z = -Math.random() * 55;
+    for (let i = 0; i < this.weatherDrops.length; i++) {
+      if (i >= activeCount) {
+        _dummy.position.set(0, -60, 0);
+        _dummy.scale.set(0, 0, 0);
+        _dummy.updateMatrix();
+        this.weatherMesh.setMatrixAt(i, _dummy.matrix);
+        continue;
+      }
+
+      const wp = this.weatherDrops[i];
+      wp.y += (isMonsoon ? wp.vy * 4.2 : wp.vy * 2.4) * dt;
+      wp.x += (isMonsoon ? -6.8 : -2.4) * dt;
+      wp.z += dz * (isMonsoon ? 0.85 : 0.55);
+
+      if (wp.y < -1 || wp.z > 10 || wp.x < -18) {
+        wp.x = (Math.random() - 0.5) * 32 + (isMonsoon ? 4 : 1);
+        wp.y = 14 + Math.random() * 10;
+        wp.z = -Math.random() * 55 + 6;
       }
 
       _dummy.position.set(wp.x, wp.y, wp.z);
-      if (isBlossom) {
-        _dummy.rotation.set(wp.rot, wp.rot * 0.7, wp.rot * 0.4);
-        _dummy.scale.set(1.7, 0.45, 1.4);
-      } else {
-        _dummy.rotation.set(0, 0, -0.22);
-        _dummy.scale.set(0.35, 2.6, 0.35);
-      }
+      _dummy.rotation.set(0, 0, isMonsoon ? -0.32 : -0.16);
+      _dummy.scale.set(isMonsoon ? 0.42 : 0.28, isMonsoon ? 3.8 : 2.1, 0.32);
       _dummy.updateMatrix();
       this.weatherMesh.setMatrixAt(i, _dummy.matrix);
       this.weatherMesh.setColorAt(i, _colScratch);
@@ -1626,6 +1947,7 @@ export class MetroRunnerEngine {
       kaapiActive: this.kaapiTimer > 0,
       chaserClose: this.chaserTimer > 0,
       callout: this.callout,
+      voiceOver: this.activeVoiceOver,
       lastStationName: this.lastStationName,
       gameOverQuip: this.gameOverQuip,
       runSummary: this.runSummary,

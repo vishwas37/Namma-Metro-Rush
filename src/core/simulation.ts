@@ -23,6 +23,7 @@ export const INPUT_BUFFER_TIME = 0.14;
 export const STUMBLE_CHASE_WINDOW = 7.5;
 export const HOVERBOARD_COOLDOWN = 14.0;
 export const ZONE_DISTANCE_INTERVAL = 720;
+export const WEATHER_CYCLE_DISTANCE = 200;
 
 export type RunnerAction = 'none' | 'left' | 'right' | 'jump' | 'roll';
 
@@ -76,16 +77,21 @@ export function computeCameraFraming(width: number, height: number): CameraFrami
 }
 
 /**
- * Classifies a live mid-touch or pointer swipe vector into a snappy runner action.
+ * Classifies a touch or pointer swipe vector into a deliberate runner action.
+ * Uses a 40px threshold + axis dominance ratio so small jitters never misfire.
  */
-export function classifySwipeGesture(dx: number, dy: number, thresholdPx = 24): RunnerAction {
+export function classifySwipeGesture(dx: number, dy: number, thresholdPx = 40): RunnerAction {
   const absX = Math.abs(dx);
   const absY = Math.abs(dy);
   if (Math.max(absX, absY) < thresholdPx) return 'none';
-  if (absX >= absY) {
+  if (absX >= absY * 1.15) {
     return dx > 0 ? 'right' : 'left';
   }
-  return dy < 0 ? 'jump' : 'roll';
+  if (absY >= absX * 1.15) {
+    return dy < 0 ? 'jump' : 'roll';
+  }
+  if (Math.max(absX, absY) < thresholdPx * 1.35) return 'none';
+  return absX >= absY ? (dx > 0 ? 'right' : 'left') : dy < 0 ? 'jump' : 'roll';
 }
 
 export interface SupportBox {
@@ -100,7 +106,9 @@ export interface SupportBox {
 
 export interface PlayerKinematics {
   lane: number;
+  lastSafeLane: number;
   x: number;
+  vx: number;
   y: number;
   vy: number;
   grounded: boolean;
@@ -119,7 +127,9 @@ export interface PlayerKinematics {
 export function createInitialPlayerKinematics(): PlayerKinematics {
   return {
     lane: 1,
+    lastSafeLane: 1,
     x: 0,
+    vx: 0,
     y: 0,
     vy: 0,
     grounded: true,
@@ -152,25 +162,25 @@ export function resolveSupportHeight(
   for (let i = 0; i < supports.length; i++) {
     const s = supports[i];
     const laneCenter = LANE_POSITIONS[s.lane];
-    if (Math.abs(playerX - laneCenter) > 1.35) continue;
+    if (Math.abs(playerX - laneCenter) > 1.38) continue;
 
     if (
       s.isRamp &&
       s.rampStartZ !== undefined &&
       s.rampEndZ !== undefined &&
-      playerZ <= s.rampStartZ + 0.5 &&
-      playerZ >= s.rampEndZ - 0.5
+      playerZ <= s.rampStartZ + 0.65 &&
+      playerZ >= s.rampEndZ - 0.85
     ) {
       const span = Math.max(0.1, s.rampStartZ - s.rampEndZ);
       const t = Math.max(0, Math.min(1, (s.rampStartZ - playerZ) / span));
       const rampY = t * s.topY;
-      if (playerY >= rampY - 0.9) {
+      if (playerY >= rampY - 1.05) {
         highest = Math.max(highest, rampY);
       }
     }
 
-    if (playerZ <= s.zStart + 0.4 && playerZ >= s.zEnd - 0.4) {
-      if (playerY >= s.topY - 0.72) {
+    if (playerZ <= s.zStart + 0.65 && playerZ >= s.zEnd - 0.5) {
+      if (playerY >= s.topY - 0.78) {
         highest = Math.max(highest, s.topY);
       }
     }
@@ -186,10 +196,47 @@ export interface PhysicsStepEvents {
   switchedLane: number;
 }
 
+export interface WeatherPhysicsProfile {
+  slippery: boolean;
+  lateralStiffness: number;
+  springStiffness: number;
+  springDamping: number;
+  slideImpulse: number;
+}
+
+export function getWeatherPhysicsProfile(weather: WeatherMode): WeatherPhysicsProfile {
+  if (weather === 'heavy_monsoon') {
+    return {
+      slippery: true,
+      lateralStiffness: 12.5,
+      springStiffness: 78,
+      springDamping: 10.6,
+      slideImpulse: 2.2,
+    };
+  }
+  if (weather === 'light_rain') {
+    return {
+      slippery: false,
+      lateralStiffness: 17.5,
+      springStiffness: 0,
+      springDamping: 0,
+      slideImpulse: 0,
+    };
+  }
+  return {
+    slippery: false,
+    lateralStiffness: 20,
+    springStiffness: 0,
+    springDamping: 0,
+    slideImpulse: 0,
+  };
+}
+
 export function stepPlayerPhysics(
   state: PlayerKinematics,
   dt: number,
   supports: SupportBox[],
+  weather: WeatherMode = 'sunny',
 ): PhysicsStepEvents {
   const events: PhysicsStepEvents = {
     jumped: false,
@@ -200,6 +247,7 @@ export function stepPlayerPhysics(
   };
 
   const clampedDt = Math.min(dt, 0.05);
+  const weatherPhys = getWeatherPhysicsProfile(weather);
 
   if (state.bufferTimer > 0) {
     state.bufferTimer -= clampedDt;
@@ -209,18 +257,30 @@ export function stepPlayerPhysics(
     state.laneChangeCooldown = Math.max(0, state.laneChangeCooldown - clampedDt);
   }
 
+  if (Math.abs(state.x - LANE_POSITIONS[state.lane]) < 0.35) {
+    state.lastSafeLane = state.lane;
+  }
+
   if (state.bufferedAction === 'left' && state.laneChangeCooldown <= 0) {
     if (state.lane > 0) {
+      state.lastSafeLane = state.lane;
       state.lane -= 1;
-      state.laneChangeCooldown = 0.085;
+      state.laneChangeCooldown = weatherPhys.slippery ? 0.11 : 0.09;
+      if (weatherPhys.slippery && state.grounded && !state.droneActive) {
+        state.vx -= weatherPhys.slideImpulse;
+      }
       events.switchedLane = -1;
     }
     state.bufferedAction = 'none';
     state.bufferTimer = 0;
   } else if (state.bufferedAction === 'right' && state.laneChangeCooldown <= 0) {
     if (state.lane < 2) {
+      state.lastSafeLane = state.lane;
       state.lane += 1;
-      state.laneChangeCooldown = 0.085;
+      state.laneChangeCooldown = weatherPhys.slippery ? 0.11 : 0.09;
+      if (weatherPhys.slippery && state.grounded && !state.droneActive) {
+        state.vx += weatherPhys.slideImpulse;
+      }
       events.switchedLane = 1;
     }
     state.bufferedAction = 'none';
@@ -228,8 +288,21 @@ export function stepPlayerPhysics(
   }
 
   const targetX = LANE_POSITIONS[state.lane];
-  const lateralAlpha = 1 - Math.exp(-19 * clampedDt);
-  state.x += (targetX - state.x) * lateralAlpha;
+  if (weatherPhys.slippery && state.grounded && !state.droneActive) {
+    // Slightly slippery Heavy Monsoon track: wet lateral momentum & subtle hydroplane drift
+    const acc = (targetX - state.x) * weatherPhys.springStiffness - state.vx * weatherPhys.springDamping;
+    state.vx += acc * clampedDt;
+    state.x = Math.max(-3.55, Math.min(3.55, state.x + state.vx * clampedDt));
+    if (Math.abs(targetX - state.x) < 0.015 && Math.abs(state.vx) < 0.08) {
+      state.x = targetX;
+      state.vx = 0;
+    }
+  } else {
+    const lateralAlpha = 1 - Math.exp(-weatherPhys.lateralStiffness * clampedDt);
+    const prevX = state.x;
+    state.x += (targetX - state.x) * lateralAlpha;
+    state.vx = clampedDt > 0 ? (state.x - prevX) / clampedDt : 0;
+  }
 
   if (state.droneActive) {
     const flyAlpha = 1 - Math.exp(-8 * clampedDt);
@@ -347,6 +420,8 @@ export interface HazardCollider {
   lane: number;
   zStart: number;
   zEnd: number;
+  prevZStart?: number;
+  prevZEnd?: number;
   height: number;
   clearanceBottomY?: number;
   rampLength?: number;
@@ -372,17 +447,31 @@ export function evaluateHazardInteraction(
 
   const laneX = LANE_POSITIONS[hazard.lane];
   const dx = Math.abs(ctx.playerX - laneX);
+  const isTrain = hazard.kind.startsWith('train');
   const playerHalfWidth = 0.48;
-  const hazardHalfWidth = hazard.kind.startsWith('train') ? 1.18 : 1.05;
+  const hazardHalfWidth = isTrain ? 1.24 : 1.08;
   const playerHeight = ctx.playerRolling ? 0.92 : 1.85;
   const playerTop = ctx.playerY + playerHeight;
 
+  // Solid front of train (for train_ramp, solid body begins after the climbable ramp)
   const effectiveFrontZ =
     hazard.kind === 'train_ramp' && hazard.rampLength
       ? hazard.zStart - hazard.rampLength
       : hazard.zStart;
+  const prevEffectiveFrontZ =
+    hazard.prevZStart !== undefined
+      ? hazard.kind === 'train_ramp' && hazard.rampLength
+        ? hazard.prevZStart - hazard.rampLength
+        : hazard.prevZStart
+      : effectiveFrontZ;
+  const prevBackZ = hazard.prevZEnd ?? hazard.zEnd;
 
-  const zOverlap = effectiveFrontZ >= -0.42 && hazard.zEnd <= 0.42;
+  // Swept Z-overlap check prevents high-speed moving trains or barriers from tunneling past player Z=0
+  const playerHalfZ = 0.48;
+  const zNowOverlap = effectiveFrontZ >= -playerHalfZ && hazard.zEnd <= playerHalfZ;
+  const zSweptThrough = prevEffectiveFrontZ < -playerHalfZ && hazard.zEnd > playerHalfZ;
+  const zSweptFront = prevEffectiveFrontZ <= playerHalfZ && effectiveFrontZ >= -playerHalfZ && prevBackZ <= playerHalfZ;
+  const zOverlap = zNowOverlap || zSweptThrough || zSweptFront;
 
   if (!zOverlap) {
     if (
@@ -399,7 +488,11 @@ export function evaluateHazardInteraction(
   }
 
   if (dx >= hazardHalfWidth + playerHalfWidth) {
-    if (!hazard.closeCallTriggered && dx <= hazardHalfWidth + playerHalfWidth + 1.25 && ctx.playerY < hazard.height) {
+    if (
+      !hazard.closeCallTriggered &&
+      dx <= hazardHalfWidth + playerHalfWidth + 1.25 &&
+      ctx.playerY < hazard.height
+    ) {
       return 'close_call';
     }
     return 'none';
@@ -411,11 +504,15 @@ export function evaluateHazardInteraction(
       return hazard.closeCallTriggered ? 'none' : 'close_call';
     }
     if (ctx.playerY >= hazard.height - 0.15) return 'none';
+  } else if (isTrain) {
+    // Standing/landing cleanly on top of the train roof
+    if (ctx.playerY >= hazard.height - 0.45) return 'none';
   } else {
     if (ctx.playerY >= hazard.height - 0.35) return 'none';
   }
 
-  const isSideHit = dx > hazardHalfWidth - 0.12 && effectiveFrontZ > 0.7;
+  // Only count as a glancing side-stumble if the train nose has clearly passed Z=0 AND player is on the outer side edge
+  const isSideHit = isTrain && dx > hazardHalfWidth - 0.14 && effectiveFrontZ > 1.35 && prevEffectiveFrontZ > 0.7;
 
   if (ctx.hoverboardActive) return 'shield_break';
   if (isSideHit && !ctx.chaserClose) return 'stumble';
@@ -430,8 +527,8 @@ export function getZoneForDistance(distanceMeters: number): ZoneMode {
 
 export function getWeatherForDistance(distanceMeters: number, zone: ZoneMode): WeatherMode {
   if (zone === 'underground') return 'sunny';
-  const cycle = Math.floor(Math.max(0, distanceMeters) / 260) % 3;
-  return cycle === 0 ? 'sunny' : cycle === 1 ? 'blossom' : 'drizzle';
+  const cycle = Math.floor(Math.max(0, distanceMeters) / WEATHER_CYCLE_DISTANCE) % 3;
+  return cycle === 0 ? 'sunny' : cycle === 1 ? 'light_rain' : 'heavy_monsoon';
 }
 
 export function getRunSpeed(distanceMeters: number, kaapiBoostActive: boolean): number {

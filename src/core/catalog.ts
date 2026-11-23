@@ -1,11 +1,20 @@
 export type MetroLine = 'purple' | 'green' | 'yellow' | 'interchange';
 export type ZoneMode = 'elevated' | 'underground';
-export type WeatherMode = 'sunny' | 'blossom' | 'drizzle';
+export type WeatherMode = 'sunny' | 'light_rain' | 'heavy_monsoon';
 export type PowerUpType = 'kaapi' | 'magnet' | 'drone';
 export type UpgradeKey = 'kaapi' | 'magnet' | 'drone' | 'hoverboard';
 export type CharacterId = 'techie' | 'skater' | 'auto_anna' | 'kaapi_master';
 export type HoverboardId = 'classic_auto' | 'bmtc_volvo' | 'startup_unicorn';
 export type GraphicsQuality = 'high' | 'eco';
+
+export const WEATHER_META: Record<
+  WeatherMode,
+  { label: string; labelKn: string; slippery: boolean }
+> = {
+  sunny: { label: 'Sunny', labelKn: 'ಬಿಸಿಲು', slippery: false },
+  light_rain: { label: 'Light Rain', labelKn: 'ಸಣ್ಣ ಮಳೆ', slippery: false },
+  heavy_monsoon: { label: 'Heavy Monsoon', labelKn: 'ಭಾರೀ ಮಳೆ', slippery: true },
+};
 
 export interface MetroStation {
   id: string;
@@ -284,38 +293,121 @@ export const UPGRADES: UpgradeSpec[] = [
   },
 ];
 
-export const BILLBOARDS: Array<{ headline: string; sub: string; bg: string; accent: string }> = [
-  { headline: 'STUCK AT SILK BOARD?', sub: 'TAKE NAMMA METRO!', bg: '#7B2CBF', accent: '#FFD60A' },
-  { headline: 'AI-POWERED MASALA DOSA', sub: 'SEED FUNDED • INDIRANAGAR', bg: '#1A1423', accent: '#2DC653' },
-  { headline: 'MEETING COULD HAVE BEEN', sub: 'A METRO RIDE', bg: '#0F172A', accent: '#FF70A6' },
-  { headline: "WON'T COME - AUTO ANNA", sub: 'ONE-AND-HALF METER ONLY', bg: '#166534', accent: '#FFD60A' },
-  { headline: 'HOT FILTER KAAPI', sub: 'NEXT EXIT • DARSHINI WI-FI', bg: '#78350F', accent: '#FDE047' },
-  { headline: 'SILK BOARD: ETA 4 YEARS', sub: 'PEAK BENGALURU MOMENT', bg: '#4C1D95', accent: '#38BDF8' },
+export interface BillboardAd {
+  headline: string;
+  sub: string;
+  badge: string;
+  bg: string;
+  accent: string;
+  stripe: string;
+}
+
+export const BILLBOARDS: BillboardAd[] = [
+  {
+    headline: 'STUCK AT SILK BOARD?',
+    sub: 'ಬೇಗ ಹೋಗು! TAKE NAMMA METRO!',
+    badge: 'ETA: 2045',
+    bg: '#DC2626',
+    accent: '#FFD60A',
+    stripe: '#FFD60A',
+  },
+  {
+    headline: 'AUTO ANNA: "WON\'T COME!"',
+    sub: 'ಒಂದೂವರೆ ಮೀಟರ್! 1.5x METER ONLY',
+    badge: 'METER DOWN',
+    bg: '#166534',
+    accent: '#FFD60A',
+    stripe: '#DC2626',
+  },
+  {
+    headline: 'AI-POWERED MASALA DOSA',
+    sub: 'ಸಕ್ಕತ್ ಕ್ರಿಸ್ಪಿ • SEED FUNDED $50M',
+    badge: 'INDIRANAGAR',
+    bg: '#1A1423',
+    accent: '#FFD60A',
+    stripe: '#2DC653',
+  },
+  {
+    headline: 'KORAMANGALA 1BHK RENT:',
+    sub: '1 KIDNEY + 10 MONTHS DEPOSIT!',
+    badge: 'NO BACHELORS',
+    bg: '#7B2CBF',
+    accent: '#FFD60A',
+    stripe: '#DC2626',
+  },
+  {
+    headline: 'THIS MEETING COULD BE',
+    sub: 'ಒಂದು ಬೈ-ಟು ಫಿಲ್ಟರ್ ಕಾಫಿ! (BY-2 KAAPI)',
+    badge: 'WFH MACHA',
+    bg: '#0F172A',
+    accent: '#FF70A6',
+    stripe: '#FFD60A',
+  },
+  {
+    headline: 'SWALPA ADJUST MAADI!',
+    sub: 'ಸ್ವಲ್ಪ ಅಡ್ಜಸ್ಟ್ ಮಾಡಿ • ROOM FOR 1 MORE',
+    badge: 'BMTC VOLVO',
+    bg: '#B91C1C',
+    accent: '#FEF08A',
+    stripe: '#FFD60A',
+  },
+  {
+    headline: 'BENGALURU WEATHER:',
+    sub: 'ಬಿಸಿಲು + ಮಳೆ + ಟ್ರಾಫಿಕ್ IN 10 MINS!',
+    badge: 'PEAK BLR',
+    bg: '#1E3A8A',
+    accent: '#38BDF8',
+    stripe: '#FFD60A',
+  },
+  {
+    headline: 'HOT DEGREE FILTER KAAPI',
+    sub: 'ಬಿಸಿ ಬಿಸಿ ಕಾಫಿ • DARSHINI WI-FI',
+    badge: 'NEXT EXIT',
+    bg: '#78350F',
+    accent: '#FDE047',
+    stripe: '#DC2626',
+  },
+  {
+    headline: 'FOUNDER SEEKING CO-FOUNDER',
+    sub: 'MUST OWN FLAT NEAR METRO STATION',
+    badge: 'HSR LAYOUT',
+    bg: '#4C1D95',
+    accent: '#FFD60A',
+    stripe: '#2DC653',
+  },
+  {
+    headline: 'ಸಿರಿಗನ್ನಡಂ ಗೆಲ್ಗೆ! NAMMA BLR',
+    sub: 'ಹಳದಿ-ಕೆಂಪು PRIDE • RIDE THE METRO!',
+    badge: 'ಕನ್ನಡ',
+    bg: '#DC2626',
+    accent: '#FFD60A',
+    stripe: '#FFD60A',
+  },
 ];
 
 export const CLOSE_CALL_QUIPS = [
-  'SWALPA ADJUST MAADI!',
-  'ONE-AND-HALF DODGE!',
-  'MACHA, CLOSE CALL!',
-  'GURU CLOSE CALL!',
-  'PEAK BENGALURU!',
-  '1.5x METER DODGE!',
+  'ಸ್ವಲ್ಪ ಅಡ್ಜಸ್ಟ್ ಮಾಡಿ! ADJUST MAADI!',
+  'ಒಂದೂವರೆ DODGE! 1.5x!',
+  'ಸಕ್ಕತ್! SAKKATH DODGE!',
+  'ಬೆಂಕಿ! BENKI CLOSE CALL!',
+  'ಸೂಪರ್ ಗುರು! SUPER GURU!',
+  'ಮಚ್ಚಾ! PEAK BENGALURU!',
 ];
 
 export const SPEED_BOOST_QUIPS = [
+  'ಬೆಂಕಿ ಸ್ಪೀಡ್! KAAPI OVERDRIVE!',
   'FASTER THAN SILK BOARD!',
-  'FILTER KAAPI OVERDRIVE!',
-  'DEGREE COFFEE TURBO!',
+  'ಸಕ್ಕತ್! DEGREE COFFEE TURBO!',
 ];
 
 export const GAME_OVER_QUIPS = [
-  "Auto Anna said 'Won't Come'!",
+  'ಆಟೋ ಅಣ್ಣ: "ಬರಲ್ಲ!" (Won\'t Come!)',
   'Stuck at Silk Board Junction!',
-  'Forgot your Namma Metro Smart Card!',
-  'BBMP Dug Up This Track!',
-  'Missed the Purple Line!',
-  'Swalpa Adjust Maadi!',
-  'Meter Down! Next Train in 2 Mins!',
+  'Forgot your ನಮ್ಮ ಮೆಟ್ರೋ Smart Card!',
+  'BBMP Dug Up This Track Again!',
+  'ಸ್ವಲ್ಪ ಅಡ್ಜಸ್ಟ್ ಮಾಡಿ! Missed the Train!',
+  'Meter Down! Next Metro in 2 Mins!',
+  'Peak Bengaluru Moment, Guru!',
 ];
 
 export type MissionMetric = 'tokens' | 'stations' | 'kaapi' | 'closeCalls';

@@ -8,8 +8,11 @@ import {
   ChevronRight,
   ChevronUp,
   ChevronDown,
+  Sun,
+  CloudRain,
+  CloudLightning,
 } from 'lucide-react';
-import type { GraphicsQuality, PlayerProfile } from '../core/catalog';
+import { WEATHER_META, type GraphicsQuality, type PlayerProfile } from '../core/catalog';
 import type { RunnerAction } from '../core/simulation';
 import type { ActivePowerUpState, HudState } from '../engine/MetroRunnerEngine';
 import {
@@ -102,6 +105,16 @@ export function GameHud({
         />
       )}
 
+      {/* Subtle Heavy Monsoon Rain-Mist Vignette */}
+      {hud.weather === 'heavy_monsoon' && hud.zone === 'elevated' && !hud.kaapiActive && (
+        <div
+          className="fixed inset-0 pointer-events-none"
+          style={{
+            boxShadow: 'inset 0 0 46px rgba(56, 189, 248, 0.32)',
+          }}
+        />
+      )}
+
       {/* Subtle Chaser Danger Edge Vignette */}
       {hud.chaserClose && !hud.kaapiActive && (
         <div
@@ -142,7 +155,8 @@ export function GameHud({
               <button
                 type="button"
                 onClick={onToggleAnnouncer}
-                aria-label={profile.announcerEnabled ? 'Mute Announcer' : 'Enable Announcer'}
+                aria-label={profile.announcerEnabled ? 'Mute Kannada Voice-Over' : 'Enable Kannada Voice-Over'}
+                title={profile.announcerEnabled ? 'Kannada Voice-Over: ON' : 'Kannada Voice-Over: OFF'}
                 className={`hidden sm:flex min-w-[44px] min-h-[44px] rounded-xl border-2 border-[#1A1423] shadow-[0_3px_0_#1A1423] active:translate-y-0.5 items-center justify-center cursor-pointer ${
                   profile.announcerEnabled ? 'bg-[#2DC653] text-[#1A1423]' : 'bg-[#1A1423]/88 text-white/60'
                 }`}
@@ -185,13 +199,45 @@ export function GameHud({
                   </span>
                 </div>
               </div>
+
+              {hud.zone === 'elevated' && (
+                <div
+                  data-testid="weather-badge"
+                  data-weather={hud.weather}
+                  className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg border-2 shadow-[0_2px_0_#1A1423] text-[10px] sm:text-[11px] font-bold tracking-wide ${
+                    hud.weather === 'heavy_monsoon'
+                      ? 'bg-[#0C4A6E]/94 border-[#38BDF8] text-[#E0F2FE]'
+                      : hud.weather === 'light_rain'
+                        ? 'bg-[#1E293B]/92 border-[#93C5FD] text-[#DBEAFE]'
+                        : 'bg-[#1A1423]/90 border-[#FFD60A]/75 text-[#FFD60A]'
+                  }`}
+                >
+                  {hud.weather === 'heavy_monsoon' ? (
+                    <CloudLightning className="w-3.5 h-3.5 text-[#38BDF8] shrink-0" />
+                  ) : hud.weather === 'light_rain' ? (
+                    <CloudRain className="w-3.5 h-3.5 text-[#93C5FD] shrink-0" />
+                  ) : (
+                    <Sun className="w-3.5 h-3.5 text-[#FFD60A] shrink-0" />
+                  )}
+                  <span>{WEATHER_META[hud.weather].label}</span>
+                  {hud.weather === 'heavy_monsoon' && (
+                    <span className="px-1 rounded bg-[#FFD60A] text-[#1A1423] font-display text-[9px] leading-tight">
+                      SLIPPERY
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
           {/* BILINGUAL NAMMA METRO STATION ARRIVAL BANNER — placed below top bar on portrait/desktop, ultra-compact on short mobile landscape */}
           {hud.stationBannerVisible && station && (
             <div className="w-full flex justify-center px-2 [@media(max-height:500px)]:-mt-11">
-              <div className="max-w-[340px] sm:max-w-[420px] [@media(max-height:500px)]:max-w-[290px] w-full rounded-xl bg-[#1A1423]/94 border-2 border-white/20 shadow-[0_4px_0_#1A1423] overflow-hidden">
+              <div className="max-w-[340px] sm:max-w-[420px] [@media(max-height:500px)]:max-w-[290px] w-full rounded-xl bg-[#1A1423]/94 border-2 border-[#FFD60A]/75 shadow-[0_4px_0_#1A1423] overflow-hidden">
+                <div className="h-1 w-full flex">
+                  <div className="w-1/2 bg-[#FFD60A]" />
+                  <div className="w-1/2 bg-[#DC2626]" />
+                </div>
                 <div
                   className="px-3 py-0.5 flex items-center justify-between text-[10px] font-bold tracking-wider text-white"
                   style={{ backgroundColor: lineTheme.bar }}
@@ -235,8 +281,42 @@ export function GameHud({
           )}
         </div>
 
-        {/* BOTTOM THUMB ZONE: Active Power-Ups + Auto Hoverboard + Optional On-Screen D-Pad */}
+        {/* BOTTOM THUMB ZONE: Kannada Voice-Over Caption + Active Power-Ups + Auto Hoverboard + Optional On-Screen D-Pad */}
         <div className="flex flex-col gap-2 w-full">
+          {hud.voiceOver && (
+            <div className="w-full flex justify-center px-2">
+              <div
+                key={hud.voiceOver.id}
+                data-testid="voiceover-toast"
+                className="max-w-[348px] sm:max-w-[430px] w-full rounded-xl bg-[#1A1423]/94 border-2 border-[#FFD60A] shadow-[0_4px_0_#1A1423] overflow-hidden flex items-stretch"
+              >
+                <div className="w-2 shrink-0 flex flex-col">
+                  <div className="h-1/2 bg-[#FFD60A]" />
+                  <div className="h-1/2 bg-[#DC2626]" />
+                </div>
+                <div className="flex items-center gap-2.5 px-3 py-1.5 min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded-lg bg-[#DC2626] border-2 border-[#FFD60A] text-[#FFD60A] flex items-center justify-center shrink-0">
+                    <Megaphone className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1 text-left">
+                    <div className="font-display text-sm sm:text-base text-[#FFD60A] leading-tight truncate">
+                      “{hud.voiceOver.phrase.romanized}”
+                    </div>
+                    <div className="flex items-center gap-1.5 text-[11px] sm:text-xs leading-snug truncate">
+                      <span className="font-kannada font-bold text-white truncate">
+                        {hud.voiceOver.phrase.kannada}
+                      </span>
+                      <span className="text-white/45 shrink-0">·</span>
+                      <span className="text-white/80 truncate">
+                        {hud.voiceOver.phrase.meaning}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-end justify-between gap-2 w-full">
             {/* Active Power-Up Radial Timers */}
             <div className="flex items-center gap-2 min-h-[48px]">

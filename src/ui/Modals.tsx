@@ -67,7 +67,7 @@ export function PauseModal({
             }`}
           >
             <Megaphone className="w-4 h-4" />
-            <span>{profile.announcerEnabled ? 'VOICE ON' : 'VOICE OFF'}</span>
+            <span>{profile.announcerEnabled ? 'KANNADA VO' : 'VO OFF'}</span>
           </button>
 
           <button

@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  LANE_POSITIONS,
   TRAIN_ROOF_Y,
+  WEATHER_CYCLE_DISTANCE,
   ZONE_DISTANCE_INTERVAL,
   applyRunToProfile,
   classifySwipeGesture,
@@ -11,6 +13,7 @@ import {
   getEffectiveMultiplier,
   getPowerUpDuration,
   getWeatherForDistance,
+  getWeatherPhysicsProfile,
   getZoneForDistance,
   purchaseOrSelectCharacter,
   purchaseOrSelectHoverboard,
@@ -31,12 +34,13 @@ test('mobile portrait vs desktop camera framing widens FOV and pulls camera back
   assert.ok(mobile.lobbyRadius > desktop.lobbyRadius, 'Portrait lobby pulls back to frame runner + train');
 });
 
-test('mid-touch swipe classifier resolves all 4 directions and ignores tiny jitter', () => {
+test('swipe classifier uses 40px threshold, rejects jitter, and resolves all 4 directions cleanly', () => {
   assert.equal(classifySwipeGesture(10, 8), 'none');
-  assert.equal(classifySwipeGesture(-42, 10), 'left');
+  assert.equal(classifySwipeGesture(28, 5), 'none');
+  assert.equal(classifySwipeGesture(-46, 10), 'left');
   assert.equal(classifySwipeGesture(48, -12), 'right');
-  assert.equal(classifySwipeGesture(6, -38), 'jump');
-  assert.equal(classifySwipeGesture(-5, 35), 'roll');
+  assert.equal(classifySwipeGesture(6, -44), 'jump');
+  assert.equal(classifySwipeGesture(-5, 45), 'roll');
 });
 
 test('lane switching, jump buffering, fast-fall slam, and ramp roof running work seamlessly', () => {
@@ -80,7 +84,7 @@ test('lane switching, jump buffering, fast-fall slam, and ramp roof running work
   assert.equal(resolveSupportHeight(0, TRAIN_ROOF_Y, supports, 0), TRAIN_ROOF_Y);
 });
 
-test('hazard collisions support gantry roll-under, hoverboard shield, side stumble, and close calls', () => {
+test('hazard collisions prevent train tunneling/pass-through and support shield, side stumble, and close calls', () => {
   const gantry: HazardCollider = {
     id: 1,
     kind: 'gantry_low',
@@ -105,28 +109,94 @@ test('hazard collisions support gantry roll-under, hoverboard shield, side stumb
     'crash',
   );
 
-  const train: HazardCollider = {
+  // Fast moving train crossing Z=0 in a single frame must NEVER tunnel through the player
+  const fastTrain: HazardCollider = {
     id: 2,
     kind: 'train_moving',
     lane: 1,
-    zStart: 1.5,
-    zEnd: -12,
+    prevZStart: -1.4,
+    prevZEnd: -19.4,
+    zStart: 1.2,
+    zEnd: -16.8,
     height: TRAIN_ROOF_Y,
   };
   assert.equal(
     evaluateHazardInteraction(
+      { playerX: 0, playerY: 0, playerRolling: false, invincible: false, hoverboardActive: false, chaserClose: false },
+      fastTrain,
+    ),
+    'crash',
+  );
+  assert.equal(
+    evaluateHazardInteraction(
       { playerX: 0, playerY: 0, playerRolling: false, invincible: false, hoverboardActive: true, chaserClose: false },
-      train,
+      fastTrain,
     ),
     'shield_break',
   );
+
+  // Glancing side brush against the middle of a train triggers side stumble (never ghosting)
+  const sideTrain: HazardCollider = {
+    id: 3,
+    kind: 'train_static',
+    lane: 1,
+    prevZStart: 3.5,
+    prevZEnd: -12.5,
+    zStart: 5.0,
+    zEnd: -11.0,
+    height: TRAIN_ROOF_Y,
+  };
+  assert.equal(
+    evaluateHazardInteraction(
+      { playerX: 1.35, playerY: 0, playerRolling: false, invincible: false, hoverboardActive: false, chaserClose: false },
+      sideTrain,
+    ),
+    'stumble',
+  );
 });
 
-test('zone transitions, weather cycling, shop unlocks, and mission multipliers work end-to-end', () => {
+test('zone transitions, weather cycling, slippery Heavy Monsoon floor, shop unlocks, and mission multipliers work end-to-end', () => {
   assert.equal(getZoneForDistance(0), 'elevated');
   assert.equal(getZoneForDistance(ZONE_DISTANCE_INTERVAL + 5), 'underground');
-  assert.equal(getWeatherForDistance(300, 'elevated'), 'blossom');
-  assert.equal(getWeatherForDistance(560, 'elevated'), 'drizzle');
+
+  // Weather cycles cleanly: Sunny -> Light Rain -> Heavy Monsoon -> Sunny
+  assert.equal(getWeatherForDistance(0, 'elevated'), 'sunny');
+  assert.equal(getWeatherForDistance(WEATHER_CYCLE_DISTANCE + 10, 'elevated'), 'light_rain');
+  assert.equal(getWeatherForDistance(WEATHER_CYCLE_DISTANCE * 2 + 10, 'elevated'), 'heavy_monsoon');
+  assert.equal(getWeatherForDistance(WEATHER_CYCLE_DISTANCE * 3 + 10, 'elevated'), 'sunny');
+  assert.equal(getWeatherForDistance(WEATHER_CYCLE_DISTANCE * 2 + 10, 'underground'), 'sunny');
+
+  assert.equal(getWeatherPhysicsProfile('sunny').slippery, false);
+  assert.equal(getWeatherPhysicsProfile('light_rain').slippery, false);
+  assert.equal(getWeatherPhysicsProfile('heavy_monsoon').slippery, true);
+
+  // Heavy Monsoon produces a slightly slippery wet-rail slide vs crisp Sunny traction
+  const sunnyRunner = createInitialPlayerKinematics();
+  const monsoonRunner = createInitialPlayerKinematics();
+  queuePlayerAction(sunnyRunner, 'right');
+  queuePlayerAction(monsoonRunner, 'right');
+
+  stepPlayerPhysics(sunnyRunner, 0.04, [], 'sunny');
+  stepPlayerPhysics(monsoonRunner, 0.04, [], 'heavy_monsoon');
+  assert.ok(
+    monsoonRunner.x < sunnyRunner.x,
+    'Heavy Monsoon wet floor should have lower initial lateral grip than Sunny',
+  );
+
+  // Monsoon runner experiences a subtle wet overshoot past target lane before settling cleanly
+  let maxX = monsoonRunner.x;
+  for (let i = 0; i < 60; i++) {
+    stepPlayerPhysics(monsoonRunner, 0.016, [], 'heavy_monsoon');
+    if (monsoonRunner.x > maxX) maxX = monsoonRunner.x;
+  }
+  assert.ok(
+    maxX > LANE_POSITIONS[2] + 0.04 && maxX <= 3.55,
+    'Heavy Monsoon should create a controlled slippery overshoot within viaduct bounds',
+  );
+  assert.ok(
+    Math.abs(monsoonRunner.x - LANE_POSITIONS[2]) < 0.05,
+    'Heavy Monsoon runner should settle cleanly back onto the target lane',
+  );
 
   let profile = createDefaultProfile();
   profile.tokens = 500;

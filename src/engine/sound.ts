@@ -1,3 +1,9 @@
+import {
+  getSpeechPayload,
+  selectPreferredSpeechVoice,
+  type VoiceOverPhrase,
+} from '../core/voiceOver';
+
 export class SoundEngine {
   private ctx: AudioContext | null = null;
   private gestureUnlocked = false;
@@ -9,6 +15,28 @@ export class SoundEngine {
   private tokenStreak = 0;
   private lastTokenTime = 0;
   private underground = false;
+  private cachedVoices: SpeechSynthesisVoice[] = [];
+  private lastVoiceOverTs = 0;
+  private onVoicesChangedBound: (() => void) | null = null;
+
+  constructor() {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      const refresh = () => {
+        try {
+          this.cachedVoices = window.speechSynthesis.getVoices();
+        } catch {
+          this.cachedVoices = [];
+        }
+      };
+      this.onVoicesChangedBound = refresh;
+      refresh();
+      try {
+        window.speechSynthesis.addEventListener?.('voiceschanged', refresh);
+      } catch {
+        // Older mobile browsers may not support addEventListener on speechSynthesis
+      }
+    }
+  }
 
   public setMuted(muted: boolean): void {
     this.muted = muted;
@@ -368,6 +396,75 @@ export class SoundEngine {
     osc.stop(now + 0.38);
   }
 
+  private getSpeechVoices(): SpeechSynthesisVoice[] {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return [];
+    if (this.cachedVoices.length === 0) {
+      try {
+        this.cachedVoices = window.speechSynthesis.getVoices();
+      } catch {
+        this.cachedVoices = [];
+      }
+    }
+    return this.cachedVoices;
+  }
+
+  private playVoiceCueChime(): void {
+    const ctx = this.getReadyCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const notes = [587.33, 880];
+    notes.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      const t = now + i * 0.065;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.055, t + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.18);
+    });
+  }
+
+  public playVoiceOver(phrase: VoiceOverPhrase): boolean {
+    if (this.muted || !this.announcerEnabled) return false;
+
+    this.lastVoiceOverTs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    this.playVoiceCueChime();
+
+    if (
+      !this.gestureUnlocked ||
+      typeof window === 'undefined' ||
+      !('speechSynthesis' in window) ||
+      typeof SpeechSynthesisUtterance === 'undefined'
+    ) {
+      return false;
+    }
+
+    try {
+      const voices = this.getSpeechVoices();
+      const matchedVoice = selectPreferredSpeechVoice(voices);
+      const payload = getSpeechPayload(phrase, matchedVoice);
+
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(payload.text);
+      if (matchedVoice) {
+        utter.voice = matchedVoice;
+      }
+      utter.lang = payload.lang;
+      utter.rate = phrase.rate;
+      utter.pitch = phrase.pitch;
+      utter.volume = 0.92;
+      window.speechSynthesis.speak(utter);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   public playStationChime(stationNameEn?: string): void {
     const ctx = this.getReadyCtx();
     if (ctx) {
@@ -388,19 +485,30 @@ export class SoundEngine {
       });
     }
 
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const voiceOverRecentlySpoke = nowMs - this.lastVoiceOverTs < 2600;
+
     if (
       stationNameEn &&
+      !voiceOverRecentlySpoke &&
       this.gestureUnlocked &&
       this.announcerEnabled &&
       !this.muted &&
       typeof window !== 'undefined' &&
-      'speechSynthesis' in window
+      'speechSynthesis' in window &&
+      typeof SpeechSynthesisUtterance !== 'undefined'
     ) {
       try {
         window.speechSynthesis.cancel();
         const utter = new SpeechSynthesisUtterance(`Next station, ${stationNameEn}`);
-        utter.rate = 1.08;
-        utter.pitch = 1.05;
+        const voices = this.getSpeechVoices();
+        const enVoice =
+          voices.find((v) => v.lang.toLowerCase().replace('_', '-') === 'en-in') ??
+          voices.find((v) => v.lang.toLowerCase().startsWith('en'));
+        if (enVoice) utter.voice = enVoice;
+        utter.lang = enVoice?.lang || 'en-IN';
+        utter.rate = 1.06;
+        utter.pitch = 1.04;
         utter.volume = 0.72;
         window.speechSynthesis.speak(utter);
       } catch {
@@ -422,6 +530,17 @@ export class SoundEngine {
   public dispose(): void {
     this.stopMusic();
     this.cancelSpeech();
+    if (
+      this.onVoicesChangedBound &&
+      typeof window !== 'undefined' &&
+      'speechSynthesis' in window
+    ) {
+      try {
+        window.speechSynthesis.removeEventListener?.('voiceschanged', this.onVoicesChangedBound);
+      } catch {
+        // ignore
+      }
+    }
     if (this.ctx) {
       void this.ctx.close().catch(() => {});
       this.ctx = null;

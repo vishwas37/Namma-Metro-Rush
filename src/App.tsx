@@ -19,7 +19,8 @@ import {
   type RunSummary,
   type RunnerAction,
 } from './core/simulation';
-import { MetroRunnerEngine, type HudState } from './engine/MetroRunnerEngine';
+import { createRunnerEngine } from './engine/createRunnerEngine';
+import type { HudState, RunnerEngine } from './engine/MetroRunnerEngine';
 import { SoundEngine } from './engine/sound';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import { GameHud } from './ui/GameHud';
@@ -45,6 +46,7 @@ function createInitialHud(profile: PlayerProfile): HudState {
     kaapiActive: false,
     chaserClose: false,
     callout: null,
+    voiceOver: null,
     lastStationName: 'Indiranagar',
     gameOverQuip: '',
     runSummary: null,
@@ -63,18 +65,27 @@ function NammaRunnerApp() {
   });
 
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const engineRef = useRef<MetroRunnerEngine | null>(null);
+  const engineRef = useRef<RunnerEngine | null>(null);
   const soundRef = useRef<SoundEngine | null>(null);
   const profileRef = useRef<PlayerProfile>(profile);
   const modeRef = useRef(hud.mode);
   const shopOpenRef = useRef(shopOpen);
 
-  // Live mid-touch swipe + double-tap tracking
-  const touchAnchorRef = useRef<{ x: number; y: number; active: boolean; moved: boolean }>({
+  // Single-action-per-swipe tracking so 1 swipe left/right ALWAYS moves exactly 1 lane
+  const touchAnchorRef = useRef<{
+    x: number;
+    y: number;
+    active: boolean;
+    acted: boolean;
+    lastAction: RunnerAction;
+    movedDist: number;
+  }>({
     x: 0,
     y: 0,
     active: false,
-    moved: false,
+    acted: false,
+    lastAction: 'none',
+    movedDist: 0,
   });
   const lastTapTsRef = useRef<number>(0);
 
@@ -107,9 +118,9 @@ function NammaRunnerApp() {
     sound.setAnnouncerEnabled(profileRef.current.announcerEnabled);
     soundRef.current = sound;
 
-    let engine: MetroRunnerEngine | null = null;
+    let engine: RunnerEngine | null = null;
     try {
-      engine = new MetroRunnerEngine(
+      engine = createRunnerEngine(
         container,
         profileRef.current,
         sound,
@@ -335,7 +346,7 @@ function NammaRunnerApp() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [handleLobby, handleResume, handleStart, updateProfileState]);
 
-  // Live mid-touch swipe gestures + chained swipes + double-tap Auto Hoverboard
+  // Crisp 1-swipe = 1-lane-step touch gesture detection (never shoots to the extreme edge on 1 swipe!)
   const handleTouchStart = useCallback(
     (e: React.TouchEvent<HTMLDivElement>) => {
       unlockAudio();
@@ -344,7 +355,14 @@ function NammaRunnerApp() {
       if (target?.closest('button')) return;
       const t = e.touches[0];
       if (!t) return;
-      touchAnchorRef.current = { x: t.clientX, y: t.clientY, active: true, moved: false };
+      touchAnchorRef.current = {
+        x: t.clientX,
+        y: t.clientY,
+        active: true,
+        acted: false,
+        lastAction: 'none',
+        movedDist: 0,
+      };
     },
     [unlockAudio],
   );
@@ -357,13 +375,25 @@ function NammaRunnerApp() {
 
     const dx = t.clientX - anchor.x;
     const dy = t.clientY - anchor.y;
-    const action = classifySwipeGesture(dx, dy, 24);
-    if (action !== 'none') {
-      engineRef.current?.queueAction(action);
-      // Reset anchor immediately so chained swipes (e.g. jump -> fast-fall or left -> right) fire cleanly without lifting finger!
-      anchor.x = t.clientX;
-      anchor.y = t.clientY;
-      anchor.moved = true;
+    anchor.movedDist = Math.max(anchor.movedDist, Math.hypot(dx, dy));
+
+    if (!anchor.acted) {
+      const action = classifySwipeGesture(dx, dy, 40);
+      if (action !== 'none') {
+        engineRef.current?.queueAction(action);
+        anchor.acted = true;
+        anchor.lastAction = action;
+        anchor.x = t.clientX;
+        anchor.y = t.clientY;
+      }
+      return;
+    }
+
+    // Only allow one intentional mid-air follow-up: swipe down to fast-fall after swiping up to jump.
+    // Horizontal swipes NEVER fire twice from a single finger drag!
+    if (anchor.lastAction === 'jump' && dy >= 52 && Math.abs(dy) > Math.abs(dx) * 1.25) {
+      engineRef.current?.queueAction('roll');
+      anchor.lastAction = 'roll';
     }
   }, []);
 
@@ -372,7 +402,7 @@ function NammaRunnerApp() {
     if (!anchor.active) return;
     anchor.active = false;
 
-    if (!anchor.moved && modeRef.current === 'playing' && !shopOpenRef.current) {
+    if (!anchor.acted && anchor.movedDist < 18 && modeRef.current === 'playing' && !shopOpenRef.current) {
       const now = performance.now();
       if (now - lastTapTsRef.current < 280) {
         engineRef.current?.activateHoverboard();
@@ -383,29 +413,35 @@ function NammaRunnerApp() {
     }
   }, []);
 
-  // Mouse drag fallback for desktop / trackpad testing
+  // Mouse drag fallback for desktop / trackpad testing (1 drag = 1 lane step)
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       unlockAudio();
       if (modeRef.current !== 'playing' || shopOpenRef.current) return;
       const target = e.target as HTMLElement | null;
       if (target?.closest('button')) return;
-      touchAnchorRef.current = { x: e.clientX, y: e.clientY, active: true, moved: false };
+      touchAnchorRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        active: true,
+        acted: false,
+        lastAction: 'none',
+        movedDist: 0,
+      };
     },
     [unlockAudio],
   );
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const anchor = touchAnchorRef.current;
-    if (!anchor.active || modeRef.current !== 'playing' || shopOpenRef.current) return;
+    if (!anchor.active || anchor.acted || modeRef.current !== 'playing' || shopOpenRef.current) return;
     const dx = e.clientX - anchor.x;
     const dy = e.clientY - anchor.y;
-    const action = classifySwipeGesture(dx, dy, 28);
+    const action = classifySwipeGesture(dx, dy, 40);
     if (action !== 'none') {
       engineRef.current?.queueAction(action);
-      anchor.x = e.clientX;
-      anchor.y = e.clientY;
-      anchor.moved = true;
+      anchor.acted = true;
+      anchor.lastAction = action;
     }
   }, []);
 

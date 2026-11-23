@@ -66,17 +66,17 @@ export function TitleScreen({
             )}
           </div>
 
-          {/* 44x44px touch-friendly audio controls + multiplier badge */}
+          {/* 44x44px touch-friendly audio controls + Karnataka multiplier badge */}
           <div className="flex items-center gap-1.5">
-            <span className="px-2.5 py-1 rounded-lg bg-[#7B2CBF] text-white font-display text-xs border-2 border-[#1A1423] shadow-[0_2px_0_#1A1423]">
+            <span className="px-2.5 py-1 rounded-lg bg-[#DC2626] text-[#FFD60A] font-display text-xs border-2 border-[#FFD60A] shadow-[0_2px_0_#1A1423]">
               x{multiplier}
             </span>
 
             <button
               type="button"
               onClick={onToggleAnnouncer}
-              aria-label={profile.announcerEnabled ? 'Disable Metro Announcer' : 'Enable Metro Announcer'}
-              title={profile.announcerEnabled ? 'Metro Announcer: ON' : 'Metro Announcer: OFF'}
+              aria-label={profile.announcerEnabled ? 'Disable Kannada Voice-Over' : 'Enable Kannada Voice-Over'}
+              title={profile.announcerEnabled ? 'Kannada Voice-Over: ON' : 'Kannada Voice-Over: OFF'}
               className={`min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl border-2 border-[#1A1423] shadow-[0_3px_0_#1A1423] active:translate-y-0.5 cursor-pointer transition-colors ${
                 profile.announcerEnabled
                   ? 'bg-[#2DC653] text-[#1A1423]'
@@ -149,10 +149,13 @@ export function TitleScreen({
             type="button"
             data-start="true"
             onClick={onStart}
-            className="order-1 sm:order-2 w-full sm:w-auto sm:min-w-[210px] min-h-[54px] px-7 py-3 rounded-2xl bg-[#2DC653] hover:bg-[#34D85E] text-[#1A1423] font-display text-xl sm:text-2xl tracking-wider border-[3px] border-[#1A1423] shadow-[0_5px_0_#1A1423] active:translate-y-1 active:shadow-[0_2px_0_#1A1423] flex items-center justify-center gap-2.5 cursor-pointer transition-transform"
+            className="order-1 sm:order-2 w-full sm:w-auto sm:min-w-[230px] min-h-[54px] px-7 py-3 rounded-2xl bg-[#2DC653] hover:bg-[#34D85E] text-[#1A1423] font-display text-xl sm:text-2xl tracking-wider border-[3px] border-[#1A1423] shadow-[0_5px_0_#1A1423] active:translate-y-1 active:shadow-[0_2px_0_#1A1423] flex items-center justify-center gap-2.5 cursor-pointer transition-transform"
           >
             <Play className="w-6 h-6 fill-[#1A1423]" />
             <span>PLAY</span>
+            <span className="font-kannada text-base sm:text-lg font-extrabold px-2 py-0.5 rounded-lg bg-[#FFD60A] text-[#DC2626] border-2 border-[#1A1423]">
+              ಓಡು!
+            </span>
           </button>
 
           {/* Secondary SHOP & MISSIONS row */}
