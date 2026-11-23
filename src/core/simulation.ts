@@ -1,16 +1,21 @@
 import {
   CHARACTERS,
+  ELEVATED_STATIONS,
   HOVERBOARDS,
+  UNDERGROUND_STATIONS,
   UPGRADES,
   createMissionsForTier,
   type CharacterId,
   type HoverboardId,
   type HoverboardPerk,
+  type MetroStation,
   type PlayerProfile,
   type UpgradeKey,
   type WeatherMode,
   type ZoneMode,
 } from './catalog';
+
+export const TRACK_TILE_WORLD_LENGTH = 20;
 
 export const LANE_POSITIONS = [-3.1, 0, 3.1] as const;
 export const TRAIN_ROOF_Y = 3.05;
@@ -773,4 +778,38 @@ export function applyRunToProfile(
     newlyCompletedMissions,
     bonusTokens,
   };
+}
+
+/**
+ * Exact 1:1 world-locked UV offset delta for scrolling the viaduct track texture
+ * so rails & concrete plinths move at the exact physical speed of trains and piers
+ * with zero stroboscopic flicker or sliding.
+ */
+export function computeTrackUvOffsetDelta(
+  forwardStep: number,
+  tileWorldLength = TRACK_TILE_WORLD_LENGTH,
+): number {
+  if (tileWorldLength <= 0) return 0;
+  return forwardStep / tileWorldLength;
+}
+
+/**
+ * Resolves the authentic next station ahead after passing/departing `currentStationId`,
+ * guaranteeing that entering a station (e.g. MG Road) NEVER announces itself as "Next station".
+ */
+export function getNextUpcomingStation(
+  currentStationId: string,
+  upcomingZone: ZoneMode,
+  nextZoneIndexOverride?: number,
+): MetroStation {
+  const list = upcomingZone === 'elevated' ? ELEVATED_STATIONS : UNDERGROUND_STATIONS;
+  if (typeof nextZoneIndexOverride === 'number' && nextZoneIndexOverride >= 0) {
+    const candidate = list[nextZoneIndexOverride % list.length];
+    if (candidate.id !== currentStationId) return candidate;
+  }
+  const idx = list.findIndex((s) => s.id === currentStationId);
+  if (idx >= 0) {
+    return list[(idx + 1) % list.length];
+  }
+  return list[0];
 }

@@ -151,7 +151,7 @@ export function createSkyDome(): SkyDomeRig {
     uSunIntensity: { value: 1.0 },
   };
 
-  const geo = new THREE.SphereGeometry(215, 24, 16);
+  const geo = new THREE.SphereGeometry(195, 24, 16);
   const mat = new THREE.ShaderMaterial({
     uniforms,
     side: THREE.BackSide,

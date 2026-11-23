@@ -606,12 +606,8 @@ export class SoundEngine {
       });
     }
 
-    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    const voiceOverRecentlySpoke = nowMs - this.lastVoiceOverTs < 2600;
-
     if (
       stationNameEn &&
-      !voiceOverRecentlySpoke &&
       this.gestureUnlocked &&
       this.announcerEnabled &&
       !this.muted &&
@@ -628,9 +624,9 @@ export class SoundEngine {
           voices.find((v) => v.lang.toLowerCase().startsWith('en'));
         if (enVoice) utter.voice = enVoice;
         utter.lang = enVoice?.lang || 'en-IN';
-        utter.rate = 1.06;
-        utter.pitch = 1.04;
-        utter.volume = 0.72;
+        utter.rate = 1.04;
+        utter.pitch = 1.02;
+        utter.volume = 0.78;
         window.speechSynthesis.speak(utter);
       } catch {
         // Ignore restricted speech synthesis

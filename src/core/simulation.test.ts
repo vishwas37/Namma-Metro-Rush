@@ -2,15 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   LANE_POSITIONS,
+  TRACK_TILE_WORLD_LENGTH,
   TRAIN_ROOF_Y,
   WEATHER_CYCLE_DISTANCE,
   ZONE_DISTANCE_INTERVAL,
   applyRunToProfile,
   classifySwipeGesture,
   computeCameraFraming,
+  computeTrackUvOffsetDelta,
   createInitialPlayerKinematics,
   evaluateHazardInteraction,
   getEffectiveMultiplier,
+  getNextUpcomingStation,
   getPowerUpDuration,
   getWeatherForDistance,
   getWeatherPhysicsProfile,
@@ -216,4 +219,20 @@ test('zone transitions, weather cycling, slippery Heavy Monsoon floor, shop unlo
   });
   assert.equal(getEffectiveMultiplier(res.profile), 2);
   assert.ok(res.bonusTokens > 0);
+});
+
+test('entering MG Road never announces MG Road as next station and track UV scrolls 1:1 with world units', () => {
+  const afterIndiranagar = getNextUpcomingStation('indiranagar', 'elevated');
+  assert.equal(afterIndiranagar.id, 'mg_road');
+
+  const afterMgRoad = getNextUpcomingStation('mg_road', 'elevated');
+  assert.notEqual(afterMgRoad.id, 'mg_road', 'Entering MG Road must never announce MG Road as next station');
+  assert.equal(afterMgRoad.id, 'jayanagar');
+
+  const enteringTunnel = getNextUpcomingStation('mg_road', 'underground', 0);
+  assert.equal(enteringTunnel.id, 'majestic');
+
+  // Track UV scroll delta matches 1 full repeat per TRACK_TILE_WORLD_LENGTH (20m)
+  assert.equal(computeTrackUvOffsetDelta(TRACK_TILE_WORLD_LENGTH), 1);
+  assert.ok(Math.abs(computeTrackUvOffsetDelta(1) - 0.05) < 1e-9);
 });

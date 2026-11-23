@@ -29,9 +29,11 @@ import {
   STUMBLE_CHASE_WINDOW,
   TRAIN_ROOF_Y,
   computeCameraFraming,
+  computeTrackUvOffsetDelta,
   createInitialPlayerKinematics,
   evaluateHazardInteraction,
   getEffectiveMultiplier,
+  getNextUpcomingStation,
   getPowerUpDuration,
   getRunSpeed,
   getWeatherForDistance,
@@ -45,11 +47,7 @@ import {
   type RunnerAction,
   type SupportBox,
 } from '../core/simulation';
-import {
-  pickVoiceOverPhrase,
-  type VoiceOverEvent,
-  type VoiceOverPhrase,
-} from '../core/voiceOver';
+import type { VoiceOverPhrase } from '../core/voiceOver';
 import { createAssetRegistry, mergeStaticGeometries, type AssetRegistry } from './assets';
 import {
   buildChaserRig,
@@ -107,6 +105,7 @@ export interface HudState {
   weather: WeatherMode;
   currentStation: MetroStation | null;
   stationBannerVisible: boolean;
+  stationBannerKind: 'next' | 'arriving';
   activePowerUps: ActivePowerUpState[];
   hoverboardReady: boolean;
   hoverboardCooldownRatio: number;
@@ -370,14 +369,12 @@ export class MetroRunnerEngine implements RunnerEngine {
   private lobbyWaveTimer = 0;
   private lobbyTransition = 0; // 0 = lobby camera, 1 = chase camera (0.65s smooth sweep!)
   private currentStation: MetroStation | null = null;
+  private stationBannerKind: 'next' | 'arriving' = 'next';
   private stationBannerTimer = 0;
+  private initialNextStationAnnounced = false;
   private callout: CalloutToast | null = null;
   private calloutTimer = 0;
   private calloutSeq = 1;
-  private voiceOver: ActiveVoiceOver | null = null;
-  private voiceOverTimer = 0;
-  private voiceOverSeq = 1;
-  private lastVoicePhraseIds: Partial<Record<VoiceOverEvent, string>> = {};
   private crashTimer = 0;
 
   // Camera & Curve State
@@ -417,12 +414,13 @@ export class MetroRunnerEngine implements RunnerEngine {
     this.scene = new THREE.Scene();
     this.fog = new THREE.Fog(0x7cc8f8, 62, 215);
     this.scene.fog = this.fog;
+    this.scene.background = this.fog.color;
 
     const width = Math.max(container.clientWidth, 1);
     const height = Math.max(container.clientHeight, 1);
     this.framing = computeCameraFraming(width, height);
     this.currentFov = this.framing.fov;
-    this.camera = new THREE.PerspectiveCamera(this.framing.fov, width / height, 0.2, 185);
+    this.camera = new THREE.PerspectiveCamera(this.framing.fov, width / height, 0.2, 260);
     this.camera.position.set(0, this.framing.lobbyY, this.framing.lobbyRadius);
 
     const { canvas, context, antialias } = webgl;
@@ -757,7 +755,7 @@ export class MetroRunnerEngine implements RunnerEngine {
       bbCount,
     );
     this.billboardPostInst = new THREE.InstancedMesh(
-      new THREE.CylinderGeometry(0.22, 0.28, 7.6, 6),
+      new THREE.CylinderGeometry(0.22, 0.28, 5.8, 6),
       this.assets.mat.steelPole,
       bbCount,
     );
@@ -859,9 +857,10 @@ export class MetroRunnerEngine implements RunnerEngine {
   }
 
   private updateStaticScenery(forwardStep: number): void {
-    // Scroll track bed texture smoothly for continuous crisp rails & sleepers
+    // Lock track bed UV scroll 1:1 with physical forward speed (zero strobe or sliding)
     if (forwardStep !== 0) {
-      this.textures.trackBed.offset.y = (this.textures.trackBed.offset.y + forwardStep * 0.16) % 1;
+      this.textures.trackBed.offset.y =
+        (this.textures.trackBed.offset.y + computeTrackUvOffsetDelta(forwardStep)) % 1;
     }
 
     if (this.elevatedGroup.visible) {
@@ -968,7 +967,7 @@ export class MetroRunnerEngine implements RunnerEngine {
         _dummy.updateMatrix();
         this.billboardBackInst.setMatrixAt(i, _dummy.matrix);
 
-        _dummy.position.set(bb.side * 10.6, 1.4, bb.z);
+        _dummy.position.set(bb.side * 10.6, 0.15, bb.z - 0.36);
         _dummy.rotation.set(0, 0, 0);
         _dummy.updateMatrix();
         this.billboardPostInst.setMatrixAt(i, _dummy.matrix);
@@ -1146,11 +1145,11 @@ export class MetroRunnerEngine implements RunnerEngine {
     this.crashTimer = 0;
     this.lobbyTransition = 0; // Triggers silky 0.65s lobby-to-chase camera sweep!
     this.currentStation = null;
+    this.stationBannerKind = 'next';
     this.stationBannerTimer = 0;
+    this.initialNextStationAnnounced = false;
     this.callout = null;
     this.calloutTimer = 0;
-    this.voiceOver = null;
-    this.voiceOverTimer = 0;
 
     this.runnerRig.root.position.set(0, 0, 0);
     this.runnerRig.root.rotation.set(0, 0, 0);
@@ -1169,7 +1168,6 @@ export class MetroRunnerEngine implements RunnerEngine {
     this.sound.setUnderground(false);
     this.sound.startMusic();
     this.sound.playChaseStart();
-    this.triggerVoiceOver('run_start');
     this.emitHud();
   }
 
@@ -1184,8 +1182,10 @@ export class MetroRunnerEngine implements RunnerEngine {
     this.lobbyTransition = 0;
     this.sound.stopMusic();
     this.sound.cancelSpeech();
-    this.voiceOver = null;
-    this.voiceOverTimer = 0;
+    this.currentStation = null;
+    this.stationBannerKind = 'next';
+    this.stationBannerTimer = 0;
+    this.initialNextStationAnnounced = false;
     this.callout = null;
     this.calloutTimer = 0;
     this.positionLobbyActors();
@@ -1224,7 +1224,6 @@ export class MetroRunnerEngine implements RunnerEngine {
     this.sound.playAutoHorn();
     this.pools.spawnBurst(this.player.x, this.player.y + 0.5, 0, this.getActiveBoardGlowColor(), 14, 6.5);
     this.showCallout('HOVERBOARD ON!', '#00f5d4');
-    this.triggerVoiceOver('hoverboard');
     this.emitHud();
   }
 
@@ -1240,21 +1239,12 @@ export class MetroRunnerEngine implements RunnerEngine {
     this.pools.triggerShockwave(this.player.x, this.player.y + 0.4, 0xffd60a);
     this.pools.spawnBurst(this.player.x, this.player.y + 1.1, 0, 0xffd60a, 18, 8.5);
     this.showCallout('NAMMA EXPRESS HEADSTART!', '#ffd60a');
-    this.triggerVoiceOver('kaapi');
     this.emitHud();
   }
 
   private showCallout(text: string, color: string): void {
     this.callout = { id: this.calloutSeq++, text, color };
     this.calloutTimer = 1.65;
-  }
-
-  private triggerVoiceOver(event: VoiceOverEvent): void {
-    const phrase = pickVoiceOverPhrase(event, this.lastVoicePhraseIds[event]);
-    this.lastVoicePhraseIds[event] = phrase.id;
-    this.voiceOver = { id: this.voiceOverSeq++, phrase };
-    this.voiceOverTimer = 2.6;
-    this.sound.playVoiceOver(phrase);
   }
 
   private applyZoneVisuals(zone: ZoneMode): void {
@@ -1493,12 +1483,10 @@ export class MetroRunnerEngine implements RunnerEngine {
       this.invincibilityTimer = Math.max(this.invincibilityTimer, 0.8);
       const quip = SPEED_BOOST_QUIPS[Math.floor(Math.random() * SPEED_BOOST_QUIPS.length)];
       this.showCallout(quip, '#f59e0b');
-      this.triggerVoiceOver('kaapi');
     } else if (type === 'magnet') {
       this.magnetDuration = getPowerUpDuration(this.profile, 'magnet');
       this.magnetTimer = this.magnetDuration;
       this.showCallout('UPI COIN MAGNET!', '#ef4444');
-      this.triggerVoiceOver('magnet');
     } else if (type === 'drone') {
       this.droneDuration = getPowerUpDuration(this.profile, 'drone');
       this.droneTimer = this.droneDuration;
@@ -1506,7 +1494,6 @@ export class MetroRunnerEngine implements RunnerEngine {
       this.runnerRig.droneMount.visible = true;
       this.invincibilityTimer = Math.max(this.invincibilityTimer, this.droneDuration + 1.0);
       this.showCallout('BENGALURU TECH DRONE!', '#00f5d4');
-      this.triggerVoiceOver('drone');
       // Spawn immediate aerial coin stream ahead across lanes!
       const lane = this.player.lane;
       for (let i = 0; i < 12; i++) {
@@ -1523,12 +1510,10 @@ export class MetroRunnerEngine implements RunnerEngine {
       this.runnerRig.sneakersLeft.visible = true;
       this.runnerRig.sneakersRight.visible = true;
       this.showCallout('SUPER SNEAKERS! JUMP ON TRAINS!', '#2dc653');
-      this.triggerVoiceOver('sneakers');
     } else if (type === 'multiplier') {
       this.multiplierDuration = getPowerUpDuration(this.profile, 'multiplier');
       this.multiplierTimer = this.multiplierDuration;
       this.showCallout('2X SCORE MULTIPLIER!', '#ffd60a');
-      this.triggerVoiceOver('multiplier');
     } else if (type === 'mystery_box') {
       this.sound.playMysteryBox();
       this.mysteryBoxesCollected++;
@@ -1550,7 +1535,6 @@ export class MetroRunnerEngine implements RunnerEngine {
         this.lastMysteryRewardLabel = '2x Multiplier Surge + 40 Tokens!';
         this.showCallout('MYSTERY BOX: 2X SURGE + 40!', '#ffd60a');
       }
-      this.triggerVoiceOver('mystery_box');
     }
     this.emitHud();
   }
@@ -1730,19 +1714,47 @@ export class MetroRunnerEngine implements RunnerEngine {
       }
     }
 
-    // Advance pooled stations
+    // Early authentic BMRCL "Next station" announcement well ahead of the first station (Indiranagar)
+    if (!this.initialNextStationAnnounced && this.distance >= 40) {
+      this.initialNextStationAnnounced = true;
+      const firstStation = ELEVATED_STATIONS[0];
+      this.currentStation = firstStation;
+      this.stationBannerKind = 'next';
+      this.stationBannerTimer = 3.4;
+      this.sound.playStationChime(firstStation.nameEn);
+      this.emitHud();
+    }
+
+    // Advance pooled stations: entering shows "ARRIVING AT" (no "Next station" speech);
+    // departing announces "Next station, <upcoming>" for the station ahead!
     for (let i = 0; i < this.pools.stations.length; i++) {
       const st = this.pools.stations[i];
       if (!st.inUse || !st.station) continue;
       st.z += forwardStep;
       st.rig.root.position.z = st.z;
-      if (!st.announced && st.z >= -28) {
+      if (!st.announced && st.z >= -24) {
         st.announced = true;
         this.currentStation = st.station;
+        this.stationBannerKind = 'arriving';
         this.lastStationName = st.station.nameEn;
-        this.stationBannerTimer = 3.2;
+        this.stationBannerTimer = 2.4;
         this.stationsPassed++;
-        this.sound.playStationChime(st.station.nameEn);
+        this.emitHud();
+      }
+      if (!st.departed && st.z >= 14) {
+        st.departed = true;
+        const nextZone: ZoneMode =
+          this.nextStationDistance >= this.nextZoneSwitchDistance
+            ? this.spawnedZone === 'elevated'
+              ? 'underground'
+              : 'elevated'
+            : this.spawnedZone;
+        const upcomingIdx = nextZone === 'elevated' ? this.elevatedIdx : this.undergroundIdx;
+        const nextSt = getNextUpcomingStation(st.station.id, nextZone, upcomingIdx);
+        this.currentStation = nextSt;
+        this.stationBannerKind = 'next';
+        this.stationBannerTimer = 3.4;
+        this.sound.playStationChime(nextSt.nameEn);
         this.emitHud();
       }
       if (st.z > 42) {
@@ -2290,6 +2302,7 @@ export class MetroRunnerEngine implements RunnerEngine {
       weather: this.weather,
       currentStation: this.currentStation,
       stationBannerVisible: this.stationBannerTimer > 0 && this.currentStation !== null,
+      stationBannerKind: this.stationBannerKind,
       activePowerUps: this.buildActivePowerUpsList().map((p) => ({ ...p })),
       hoverboardReady: this.hoverboardTimer === 0 && this.hoverboardCooldown === 0 && this.droneTimer === 0,
       hoverboardCooldownRatio:
@@ -2302,7 +2315,7 @@ export class MetroRunnerEngine implements RunnerEngine {
       headstartAvailable: this.mode === 'playing' && !this.headstartActive && this.runTime < HEADSTART_WINDOW,
       chaserClose: this.chaserTimer > 0,
       callout: this.callout,
-      voiceOver: this.voiceOver,
+      voiceOver: null,
       lastStationName: this.lastStationName,
       gameOverQuip: this.gameOverQuip,
       runSummary: this.runSummary,
@@ -2351,13 +2364,6 @@ export class MetroRunnerEngine implements RunnerEngine {
       this.calloutTimer = Math.max(0, this.calloutTimer - frameDt);
       if (this.calloutTimer === 0) {
         this.callout = null;
-        hudEventChanged = true;
-      }
-    }
-    if (this.voiceOverTimer > 0) {
-      this.voiceOverTimer = Math.max(0, this.voiceOverTimer - frameDt);
-      if (this.voiceOverTimer === 0) {
-        this.voiceOver = null;
         hudEventChanged = true;
       }
     }

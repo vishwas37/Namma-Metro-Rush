@@ -40,6 +40,7 @@ function createInitialHud(profile: PlayerProfile): HudState {
     weather: 'sunny',
     currentStation: ELEVATED_STATIONS[0],
     stationBannerVisible: false,
+    stationBannerKind: 'next',
     activePowerUps: [],
     hoverboardReady: true,
     hoverboardCooldownRatio: 1,

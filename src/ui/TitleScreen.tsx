@@ -75,8 +75,8 @@ export function TitleScreen({
             <button
               type="button"
               onClick={onToggleAnnouncer}
-              aria-label={profile.announcerEnabled ? 'Disable Kannada Voice-Over' : 'Enable Kannada Voice-Over'}
-              title={profile.announcerEnabled ? 'Kannada Voice-Over: ON' : 'Kannada Voice-Over: OFF'}
+              aria-label={profile.announcerEnabled ? 'Disable Station Announcer' : 'Enable Station Announcer'}
+              title={profile.announcerEnabled ? 'Station Announcer: ON' : 'Station Announcer: OFF'}
               className={`min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl border-2 border-[#1A1423] shadow-[0_3px_0_#1A1423] active:translate-y-0.5 cursor-pointer transition-colors ${
                 profile.announcerEnabled
                   ? 'bg-[#2DC653] text-[#1A1423]'

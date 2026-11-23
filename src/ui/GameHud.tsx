@@ -246,8 +246,8 @@ export const GameHud = forwardRef<GameHudHandle, GameHudProps>(function GameHud(
                 <button
                   type="button"
                   onClick={onToggleAnnouncer}
-                  aria-label={profile.announcerEnabled ? 'Mute Kannada Voice-Over' : 'Enable Kannada Voice-Over'}
-                  title={profile.announcerEnabled ? 'Kannada Voice-Over: ON' : 'Kannada Voice-Over: OFF'}
+                  aria-label={profile.announcerEnabled ? 'Mute Station Announcer' : 'Enable Station Announcer'}
+                  title={profile.announcerEnabled ? 'Station Announcer: ON' : 'Station Announcer: OFF'}
                   className={`hidden sm:flex min-w-[44px] min-h-[44px] rounded-xl border-[3px] border-[#1A1423] shadow-[0_3px_0_#1A1423] active:translate-y-0.5 items-center justify-center cursor-pointer ${
                     profile.announcerEnabled ? 'bg-[#2DC653] text-[#1A1423]' : 'bg-[#1A1423]/88 text-white/60'
                   }`}
@@ -361,7 +361,11 @@ export const GameHud = forwardRef<GameHudHandle, GameHudProps>(function GameHud(
                   className="px-3 py-0.5 flex items-center justify-between text-[10px] font-bold tracking-wider text-white"
                   style={{ backgroundColor: lineTheme.bar }}
                 >
-                  <span>NEXT STATION · ಮುಂದಿನ ನಿಲ್ದಾಣ</span>
+                  <span>
+                    {hud.stationBannerKind === 'arriving'
+                      ? 'ARRIVING AT · ನಿಲ್ದಾಣ'
+                      : 'NEXT STATION · ಮುಂದಿನ ನಿಲ್ದಾಣ'}
+                  </span>
                   <span className="[@media(max-height:500px)]:hidden">{lineTheme.label}</span>
                 </div>
                 <div className="px-3 py-1.5 [@media(max-height:500px)]:py-1 text-center">
@@ -400,42 +404,8 @@ export const GameHud = forwardRef<GameHudHandle, GameHudProps>(function GameHud(
           )}
         </div>
 
-        {/* BOTTOM THUMB ZONE: Kannada Voice-Over + Headstart + Ref-Driven Power-Up Rings + Hoverboard */}
+        {/* BOTTOM THUMB ZONE: Headstart + Ref-Driven Power-Up Rings + Hoverboard */}
         <div className="flex flex-col gap-2 w-full">
-          {hud.voiceOver && (
-            <div className="w-full flex justify-center px-2">
-              <div
-                key={hud.voiceOver.id}
-                data-testid="voiceover-toast"
-                className="max-w-[348px] sm:max-w-[430px] w-full rounded-xl bg-[#1A1423]/94 border-[3px] border-[#FFD60A] shadow-[0_4px_0_#1A1423] overflow-hidden flex items-stretch"
-              >
-                <div className="w-2 shrink-0 flex flex-col">
-                  <div className="h-1/2 bg-[#FFD60A]" />
-                  <div className="h-1/2 bg-[#DC2626]" />
-                </div>
-                <div className="flex items-center gap-2.5 px-3 py-1.5 min-w-0 flex-1">
-                  <div className="w-8 h-8 rounded-lg bg-[#DC2626] border-2 border-[#FFD60A] text-[#FFD60A] flex items-center justify-center shrink-0">
-                    <Megaphone className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0 flex-1 text-left">
-                    <div className="font-display text-sm sm:text-base text-[#FFD60A] leading-tight truncate">
-                      “{hud.voiceOver.phrase.romanized}”
-                    </div>
-                    <div className="flex items-center gap-1.5 text-[11px] sm:text-xs leading-snug truncate">
-                      <span className="font-kannada font-bold text-white truncate">
-                        {hud.voiceOver.phrase.kannada}
-                      </span>
-                      <span className="text-white/45 shrink-0">·</span>
-                      <span className="text-white/80 truncate">
-                        {hud.voiceOver.phrase.meaning}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
           <div className="flex items-end justify-between gap-2 w-full">
             {/* Bottom-Left: 3-Second Headstart Button + Circular Power-Up Rings (ref-driven!) */}
             <div className="flex items-center gap-2 min-h-[52px]">

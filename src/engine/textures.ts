@@ -36,7 +36,10 @@ function makeCanvasTex(
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = Math.min(4, Math.max(1, maxAnisotropy));
+  tex.anisotropy = Math.min(8, Math.max(1, maxAnisotropy));
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
   if (repeatX !== 1 || repeatY !== 1) {
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
@@ -78,74 +81,64 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
     return t;
   };
 
-  // Stylized hand-painted Bengaluru Metro weathered viaduct concrete + ballast + gleaming twin steel rails
+  // Smooth, eye-friendly modern Namma Metro ballastless concrete slab tracks:
+  // repeatY = 11 across 220m deck -> exact 20.0m per tile (8 gentle plinths = 2.5m spacing, zero moiré/strobe!)
   const trackBed = reg(
     makeCanvasTex(
       512,
       512,
       (ctx, w, h) => {
+        // Calm matte viaduct concrete deck (no noisy high-frequency speckles that shimmer in motion)
         const bgGrad = ctx.createLinearGradient(0, 0, w, 0);
-        bgGrad.addColorStop(0, '#5a6375');
+        bgGrad.addColorStop(0, '#5c6678');
         bgGrad.addColorStop(0.5, '#687387');
-        bgGrad.addColorStop(1, '#5a6375');
+        bgGrad.addColorStop(1, '#5c6678');
         ctx.fillStyle = bgGrad;
         ctx.fillRect(0, 0, w, h);
 
-        // Weathered concrete speckle & expansion seams
-        for (let i = 0; i < 620; i++) {
-          const x = (i * 73) % w;
-          const y = (i * 137) % h;
-          ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.14)';
-          ctx.fillRect(x, y, 4, 4);
-        }
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.22)';
-        for (let y = 0; y < h; y += 128) {
-          ctx.fillRect(0, y, w, 3);
-        }
+        // Subtle concrete slab deck expansion joints (only 2 per 20m tile -> calm 10m rhythm)
+        ctx.fillStyle = 'rgba(30, 41, 59, 0.16)';
+        ctx.fillRect(0, 0, w, 4);
+        ctx.fillRect(0, h / 2, w, 4);
 
         const laneCenters = [w * 0.19, w * 0.5, w * 0.81];
-        const laneW = w * 0.255;
+        const laneW = w * 0.26;
         for (const cx of laneCenters) {
-          // Ballast trough
-          ctx.fillStyle = '#333b4d';
+          // Smooth recessed ballastless concrete plinth channel
+          const troughGrad = ctx.createLinearGradient(cx - laneW / 2, 0, cx + laneW / 2, 0);
+          troughGrad.addColorStop(0, '#454f62');
+          troughGrad.addColorStop(0.15, '#4d586c');
+          troughGrad.addColorStop(0.85, '#4d586c');
+          troughGrad.addColorStop(1, '#454f62');
+          ctx.fillStyle = troughGrad;
           ctx.fillRect(cx - laneW / 2, 0, laneW, h);
 
-          // Crushed granite ballast gravel speckles
-          for (let g = 0; g < 160; g++) {
-            const gx = cx - laneW * 0.45 + ((g * 41) % Math.floor(laneW * 0.9));
-            const gy = (g * 97) % h;
-            ctx.fillStyle = g % 3 === 0 ? 'rgba(226,232,240,0.18)' : 'rgba(15,23,42,0.28)';
-            ctx.fillRect(gx, gy, 3, 3);
+          // Softly shaded low-contrast concrete rail plinth blocks (8 per 20m tile = 2.5m spacing, zero harsh strobing)
+          for (let y = 16; y < h; y += 64) {
+            ctx.fillStyle = '#58647a';
+            ctx.fillRect(cx - laneW * 0.4, y, laneW * 0.8, 18);
+            ctx.fillStyle = 'rgba(203, 213, 225, 0.22)';
+            ctx.fillRect(cx - laneW * 0.4, y, laneW * 0.8, 3);
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.18)';
+            ctx.fillRect(cx - laneW * 0.4, y + 16, laneW * 0.8, 3);
           }
 
-          // Heavy concrete metro sleepers with beveled highlight & shadow
-          for (let y = 10; y < h; y += 32) {
-            ctx.fillStyle = '#7c879e';
-            ctx.fillRect(cx - laneW * 0.43, y, laneW * 0.86, 13);
-            ctx.fillStyle = '#cbd5e1';
-            ctx.fillRect(cx - laneW * 0.43, y, laneW * 0.86, 3);
-            ctx.fillStyle = '#1e293b';
-            ctx.fillRect(cx - laneW * 0.43, y + 11, laneW * 0.86, 3);
-          }
-
-          // Gleaming twin steel rails + rail fasteners
+          // Smooth continuous brushed-steel twin running rails (vertical lines have zero forward flicker!)
           for (const ro of [-laneW * 0.3, laneW * 0.3]) {
-            ctx.fillStyle = '#1e293b';
+            ctx.fillStyle = '#2d3748';
             ctx.fillRect(cx + ro - 6, 0, 12, h);
-            ctx.fillStyle = '#cbd5e1';
+            ctx.fillStyle = '#bcc8d8';
             ctx.fillRect(cx + ro - 4, 0, 8, h);
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle = '#eef2f7';
             ctx.fillRect(cx + ro - 1.5, 0, 3, h);
           }
 
-          // Iconic BMRCL yellow third-rail power shroud
-          ctx.fillStyle = '#facc15';
+          // Clean BMRCL muted-gold third-rail power shroud
+          ctx.fillStyle = '#eab308';
           ctx.fillRect(cx + laneW * 0.44, 0, 5, h);
-          ctx.fillStyle = '#fef08a';
-          ctx.fillRect(cx + laneW * 0.44, 0, 2, h);
         }
 
-        // Karnataka Yellow + Red (Arishina-Kunkuma) safety edge strips
+        // Clean Karnataka Yellow + Red (Arishina-Kunkuma) continuous viaduct safety borders
         ctx.fillStyle = '#ffd60a';
         ctx.fillRect(0, 0, 11, h);
         ctx.fillRect(w - 11, 0, 11, h);
@@ -155,7 +148,7 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
       },
       maxAnisotropy,
       1,
-      4,
+      11,
     ),
   );
 

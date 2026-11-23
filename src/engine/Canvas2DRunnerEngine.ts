@@ -26,6 +26,7 @@ import {
   createInitialPlayerKinematics,
   evaluateHazardInteraction,
   getEffectiveMultiplier,
+  getNextUpcomingStation,
   getPowerUpDuration,
   getRunSpeed,
   getWeatherForDistance,
@@ -38,13 +39,8 @@ import {
   type RunnerAction,
   type SupportBox,
 } from '../core/simulation';
-import {
-  pickVoiceOverPhrase,
-  type VoiceOverEvent,
-} from '../core/voiceOver';
 import type {
   ActivePowerUpState,
-  ActiveVoiceOver,
   CalloutToast,
   GameMode,
   HudLiveCounters,
@@ -78,6 +74,7 @@ interface Station2D {
   station: MetroStation;
   z: number;
   announced: boolean;
+  departed: boolean;
 }
 
 interface Portal2D {
@@ -185,14 +182,12 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
   private trackScroll = 0;
 
   private stationBannerTimer = 0;
+  private stationBannerKind: 'next' | 'arriving' = 'next';
   private activeStationBanner: MetroStation | null = null;
+  private initialNextStationAnnounced = false;
   private callout: CalloutToast | null = null;
   private calloutTimer = 0;
   private calloutSeq = 1;
-  private activeVoiceOver: ActiveVoiceOver | null = null;
-  private voiceOverTimer = 0;
-  private voiceOverSeq = 1;
-  private lastVoiceOverByEvent: Partial<Record<VoiceOverEvent, string>> = {};
 
   private kaapiTimer = 0;
   private kaapiDuration = 5.5;
@@ -316,18 +311,16 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     this.chaserTimer = 4.2;
     this.stumbleGraceTimer = 0;
     this.stationBannerTimer = 0;
+    this.stationBannerKind = 'next';
     this.activeStationBanner = null;
+    this.initialNextStationAnnounced = false;
     this.callout = null;
     this.calloutTimer = 0;
-    this.activeVoiceOver = null;
-    this.voiceOverTimer = 0;
 
     this.spawnTokenLine(1, -18, 8, 1.05, 3.2);
     this.nextWaveZ = -88;
 
     this.sound.startMusic();
-    this.triggerStationBanner(ELEVATED_STATIONS[0], false);
-    this.triggerVoiceOver('run_start');
     this.pushHud(true);
   }
 
@@ -341,8 +334,10 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     this.mode = 'title';
     this.sound.stopMusic();
     this.sound.cancelSpeech();
-    this.activeVoiceOver = null;
-    this.voiceOverTimer = 0;
+    this.activeStationBanner = null;
+    this.stationBannerKind = 'next';
+    this.stationBannerTimer = 0;
+    this.initialNextStationAnnounced = false;
     this.player = createInitialPlayerKinematics();
     this.zone = 'elevated';
     this.weather = 'sunny';
@@ -379,7 +374,6 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     this.sound.playAutoHorn();
     this.spawnBurst(this.player.x, this.player.y + 0.4, 0, '#FFD60A', 16);
     this.showCallout('AUTO BOARD ON! PEE-PEE!', '#FFD60A');
-    this.triggerVoiceOver('hoverboard');
     this.pushHud(true);
   }
 
@@ -393,7 +387,6 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     this.sound.playHeadstart();
     this.spawnBurst(this.player.x, this.player.y + 1.0, 0, '#FFD60A', 18);
     this.showCallout('NAMMA EXPRESS HEADSTART!', '#FFD60A');
-    this.triggerVoiceOver('kaapi');
     this.pushHud(true);
   }
 
@@ -403,19 +396,17 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     this.pushHud(true);
   }
 
-  private triggerVoiceOver(event: VoiceOverEvent): void {
-    const phrase = pickVoiceOverPhrase(event, this.lastVoiceOverByEvent[event]);
-    this.lastVoiceOverByEvent[event] = phrase.id;
-    this.activeVoiceOver = { id: this.voiceOverSeq++, phrase };
-    this.voiceOverTimer = 3.2;
-    this.sound.playVoiceOver(phrase);
-    this.pushHud(true);
-  }
-
-  private triggerStationBanner(station: MetroStation, announce: boolean): void {
+  private triggerStationBanner(
+    station: MetroStation,
+    kind: 'next' | 'arriving',
+    announce: boolean,
+  ): void {
     this.activeStationBanner = station;
-    this.stationBannerTimer = 4.0;
-    this.lastStationName = station.nameEn;
+    this.stationBannerKind = kind;
+    this.stationBannerTimer = kind === 'arriving' ? 2.4 : 3.4;
+    if (kind === 'arriving') {
+      this.lastStationName = station.nameEn;
+    }
     if (announce) this.sound.playStationChime(station.nameEn);
     this.pushHud(true);
   }
@@ -597,7 +588,6 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
       this.spawnBurst(this.player.x, this.player.y + 1.2, 0, '#C084FC', 18);
       this.showCallout('MYSTERY BOX: +65 TOKENS!', '#C084FC');
     }
-    this.triggerVoiceOver(type);
     this.pushHud(true);
   }
 
@@ -699,10 +689,6 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
       this.calloutTimer = Math.max(0, this.calloutTimer - dt);
       if (this.calloutTimer <= 0) this.callout = null;
     }
-    if (this.voiceOverTimer > 0) {
-      this.voiceOverTimer = Math.max(0, this.voiceOverTimer - dt);
-      if (this.voiceOverTimer <= 0) this.activeVoiceOver = null;
-    }
     this.cameraTrauma = Math.max(0, this.cameraTrauma - dt * 1.8);
 
     const speed = getRunSpeed(this.distance, this.kaapiTimer > 0, this.headstartActive);
@@ -713,11 +699,16 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     const mult = this.multiplierTimer > 0 ? baseMult * 2 : baseMult;
     this.score += dz * mult * (this.kaapiTimer > 0 || this.headstartActive ? 1.8 : 1.0);
 
+    if (!this.initialNextStationAnnounced && this.distance >= 40) {
+      this.initialNextStationAnnounced = true;
+      this.triggerStationBanner(ELEVATED_STATIONS[0], 'next', true);
+    }
+
     if (this.distance >= this.nextStationDist) {
       const list = this.spawnedZone === 'elevated' ? ELEVATED_STATIONS : UNDERGROUND_STATIONS;
-      const idx = this.spawnedZone === 'elevated' ? ++this.elevatedIdx : ++this.undergroundIdx;
+      const idx = this.spawnedZone === 'elevated' ? this.elevatedIdx++ : this.undergroundIdx++;
       const station = list[idx % list.length];
-      this.stations.push({ station, z: -125, announced: false });
+      this.stations.push({ station, z: -125, announced: false, departed: false });
       this.nextStationDist += 225;
     }
 
@@ -770,10 +761,22 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     for (let i = this.stations.length - 1; i >= 0; i--) {
       const s = this.stations[i];
       s.z += dz;
-      if (!s.announced && s.z > -52) {
+      if (!s.announced && s.z > -32) {
         s.announced = true;
         this.stationsPassed++;
-        this.triggerStationBanner(s.station, true);
+        this.triggerStationBanner(s.station, 'arriving', false);
+      }
+      if (!s.departed && s.z > 14) {
+        s.departed = true;
+        const nextZone: ZoneMode =
+          this.nextStationDist >= this.nextZoneDist
+            ? this.spawnedZone === 'elevated'
+              ? 'underground'
+              : 'elevated'
+            : this.spawnedZone;
+        const upcomingIdx = nextZone === 'elevated' ? this.elevatedIdx : this.undergroundIdx;
+        const nextSt = getNextUpcomingStation(s.station.id, nextZone, upcomingIdx);
+        this.triggerStationBanner(nextSt, 'next', true);
       }
       if (s.z > 28) this.stations.splice(i, 1);
     }
@@ -1146,16 +1149,16 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     ctx.closePath();
     ctx.fill();
 
-    // Scrolling concrete sleepers
-    const sleeperStep = 4;
+    // Calm, wide-spaced ballastless concrete expansion joints (fade out cleanly before horizon)
+    const sleeperStep = 6;
     const offset = this.trackScroll % sleeperStep;
-    ctx.strokeStyle = this.zone === 'underground' ? 'rgba(168,85,247,0.22)' : 'rgba(226,232,240,0.42)';
-    for (let z = nearZ; z > farZ; z -= sleeperStep) {
+    ctx.strokeStyle = this.zone === 'underground' ? 'rgba(168,85,247,0.12)' : 'rgba(226,232,240,0.16)';
+    for (let z = nearZ; z > -64; z -= sleeperStep) {
       const zz = z + offset;
-      const pL = this.project(-5.2, 0.02, zz);
-      const pR = this.project(5.2, 0.02, zz);
+      const pL = this.project(-5.1, 0.02, zz);
+      const pR = this.project(5.1, 0.02, zz);
       if (!pL || !pR) continue;
-      ctx.lineWidth = Math.max(1, pL.scale * 0.14);
+      ctx.lineWidth = Math.max(1, pL.scale * 0.11);
       ctx.beginPath();
       ctx.moveTo(pL.sx, pL.sy);
       ctx.lineTo(pR.sx, pR.sy);
@@ -1800,6 +1803,7 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
       weather: this.weather,
       currentStation: this.activeStationBanner,
       stationBannerVisible: this.stationBannerTimer > 0 && this.activeStationBanner !== null,
+      stationBannerKind: this.stationBannerKind,
       activePowerUps,
       hoverboardReady: this.hoverboardTimer <= 0 && this.hoverboardCooldown <= 0,
       hoverboardCooldownRatio: cdRatio,
@@ -1809,7 +1813,7 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
       headstartAvailable: headstartRemaining > 0,
       chaserClose: this.chaserTimer > 0,
       callout: this.callout,
-      voiceOver: this.activeVoiceOver,
+      voiceOver: null,
       lastStationName: this.lastStationName,
       gameOverQuip: this.gameOverQuip,
       runSummary: this.runSummary,

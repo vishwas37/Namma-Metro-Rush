@@ -43,6 +43,7 @@ export interface PooledStationSlot {
   station: MetroStation | null;
   z: number;
   announced: boolean;
+  departed: boolean;
   inUse: boolean;
 }
 
@@ -387,7 +388,7 @@ export function createEntityPools(scene: THREE.Scene, assets: AssetRegistry): En
       const rig = buildStationRig(zone, assets);
       rig.root.visible = false;
       scene.add(rig.root);
-      stations.push({ rig, zone, station: null, z: 200, announced: false, inUse: false });
+      stations.push({ rig, zone, station: null, z: 200, announced: false, departed: false, inUse: false });
     }
   }
 
@@ -398,6 +399,7 @@ export function createEntityPools(scene: THREE.Scene, assets: AssetRegistry): En
     slot.station = station;
     slot.z = z;
     slot.announced = false;
+    slot.departed = false;
     slot.rig.configure(station);
     slot.rig.root.position.set(0, 0, z);
     slot.rig.root.visible = true;
