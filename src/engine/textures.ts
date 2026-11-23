@@ -9,7 +9,6 @@ function drawRoundedRect(
   h: number,
   r: number,
 ): void {
-  // Safari <16 & older WebView safe rounded rect helper (never depends on ctx.roundRect)
   const radius = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
   ctx.moveTo(x + radius, y);
@@ -53,13 +52,19 @@ export interface TextureLibrary {
   trainSideGreen: THREE.CanvasTexture;
   trainFrontPurple: THREE.CanvasTexture;
   trainFrontGreen: THREE.CanvasTexture;
+  trainFrontMajestic: THREE.CanvasTexture;
   bbmpHazard: THREE.CanvasTexture;
   mindTheGap: THREE.CanvasTexture;
+  pillarHazard: THREE.CanvasTexture;
+  mysteryBox: THREE.CanvasTexture;
   tunnelSign: THREE.CanvasTexture;
   kannadaFlag: THREE.CanvasTexture;
   kannadaArchSign: THREE.CanvasTexture;
   contactShadow: THREE.CanvasTexture;
+  glowSprite: THREE.CanvasTexture;
+  lightCone: THREE.CanvasTexture;
   techFacade: THREE.CanvasTexture;
+  shopfrontFacade: THREE.CanvasTexture;
   getStationSign: (station: MetroStation) => THREE.CanvasTexture;
   createBillboard: (ad: BillboardAd) => THREE.CanvasTexture;
   dispose: () => void;
@@ -73,54 +78,80 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
     return t;
   };
 
+  // Stylized hand-painted Bengaluru Metro weathered viaduct concrete + ballast + gleaming twin steel rails
   const trackBed = reg(
     makeCanvasTex(
       512,
       512,
       (ctx, w, h) => {
-        ctx.fillStyle = '#4a5263';
+        const bgGrad = ctx.createLinearGradient(0, 0, w, 0);
+        bgGrad.addColorStop(0, '#5a6375');
+        bgGrad.addColorStop(0.5, '#687387');
+        bgGrad.addColorStop(1, '#5a6375');
+        ctx.fillStyle = bgGrad;
         ctx.fillRect(0, 0, w, h);
 
-        for (let i = 0; i < 550; i++) {
+        // Weathered concrete speckle & expansion seams
+        for (let i = 0; i < 620; i++) {
           const x = (i * 73) % w;
           const y = (i * 137) % h;
-          ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.12)';
+          ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.14)';
           ctx.fillRect(x, y, 4, 4);
+        }
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.22)';
+        for (let y = 0; y < h; y += 128) {
+          ctx.fillRect(0, y, w, 3);
         }
 
         const laneCenters = [w * 0.19, w * 0.5, w * 0.81];
-        const laneW = w * 0.25;
+        const laneW = w * 0.255;
         for (const cx of laneCenters) {
-          ctx.fillStyle = '#333b4a';
+          // Ballast trough
+          ctx.fillStyle = '#333b4d';
           ctx.fillRect(cx - laneW / 2, 0, laneW, h);
 
-          for (let y = 12; y < h; y += 36) {
-            ctx.fillStyle = '#6c758a';
-            ctx.fillRect(cx - laneW * 0.43, y, laneW * 0.86, 14);
-            ctx.fillStyle = '#94a3b8';
-            ctx.fillRect(cx - laneW * 0.43, y, laneW * 0.86, 3);
-            ctx.fillStyle = '#1e293b';
-            ctx.fillRect(cx - laneW * 0.43, y + 12, laneW * 0.86, 3);
+          // Crushed granite ballast gravel speckles
+          for (let g = 0; g < 160; g++) {
+            const gx = cx - laneW * 0.45 + ((g * 41) % Math.floor(laneW * 0.9));
+            const gy = (g * 97) % h;
+            ctx.fillStyle = g % 3 === 0 ? 'rgba(226,232,240,0.18)' : 'rgba(15,23,42,0.28)';
+            ctx.fillRect(gx, gy, 3, 3);
           }
 
+          // Heavy concrete metro sleepers with beveled highlight & shadow
+          for (let y = 10; y < h; y += 32) {
+            ctx.fillStyle = '#7c879e';
+            ctx.fillRect(cx - laneW * 0.43, y, laneW * 0.86, 13);
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillRect(cx - laneW * 0.43, y, laneW * 0.86, 3);
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(cx - laneW * 0.43, y + 11, laneW * 0.86, 3);
+          }
+
+          // Gleaming twin steel rails + rail fasteners
           for (const ro of [-laneW * 0.3, laneW * 0.3]) {
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(cx + ro - 6, 0, 12, h);
             ctx.fillStyle = '#cbd5e1';
             ctx.fillRect(cx + ro - 4, 0, 8, h);
             ctx.fillStyle = '#ffffff';
             ctx.fillRect(cx + ro - 1.5, 0, 3, h);
           }
 
+          // Iconic BMRCL yellow third-rail power shroud
           ctx.fillStyle = '#facc15';
           ctx.fillRect(cx + laneW * 0.44, 0, 5, h);
+          ctx.fillStyle = '#fef08a';
+          ctx.fillRect(cx + laneW * 0.44, 0, 2, h);
         }
 
         // Karnataka Yellow + Red (Arishina-Kunkuma) safety edge strips
         ctx.fillStyle = '#ffd60a';
-        ctx.fillRect(0, 0, 10, h);
-        ctx.fillRect(w - 10, 0, 10, h);
+        ctx.fillRect(0, 0, 11, h);
+        ctx.fillRect(w - 11, 0, 11, h);
         ctx.fillStyle = '#dc2626';
-        ctx.fillRect(10, 0, 6, h);
-        ctx.fillRect(w - 16, 0, 6, h);
+        ctx.fillRect(11, 0, 6, h);
+        ctx.fillRect(w - 17, 0, 6, h);
       },
       maxAnisotropy,
       1,
@@ -128,6 +159,7 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
     ),
   );
 
+  // BEML Stainless-Steel Namma Metro coach sides with glossy windows & Kannada branding
   const makeTrainSide = (stripe: string, label: string) =>
     reg(
       makeCanvasTex(
@@ -135,11 +167,17 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
         256,
         (ctx, w, h) => {
           const grad = ctx.createLinearGradient(0, 0, 0, h);
-          grad.addColorStop(0, '#f8fafc');
-          grad.addColorStop(0.55, '#e2e8f0');
-          grad.addColorStop(1, '#cbd5e1');
+          grad.addColorStop(0, '#ffffff');
+          grad.addColorStop(0.28, '#e2e8f0');
+          grad.addColorStop(0.62, '#cbd5e1');
+          grad.addColorStop(1, '#94a3b8');
           ctx.fillStyle = grad;
           ctx.fillRect(0, 0, w, h);
+
+          // Brushed stainless steel horizontal sheen bands
+          ctx.fillStyle = 'rgba(255,255,255,0.45)';
+          ctx.fillRect(0, 34, w, 6);
+          ctx.fillRect(0, 134, w, 4);
 
           // Top Karnataka Yellow-Red accent + Metro line stripe
           ctx.fillStyle = '#ffd60a';
@@ -147,10 +185,11 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
           ctx.fillStyle = '#dc2626';
           ctx.fillRect(0, 12, w, 6);
           ctx.fillStyle = stripe;
-          ctx.fillRect(0, 18, w, 14);
+          ctx.fillRect(0, 18, w, 16);
 
+          // Lower bold BMRCL livery band
           ctx.fillStyle = stripe;
-          ctx.fillRect(0, h - 80, w, 36);
+          ctx.fillRect(0, h - 82, w, 38);
           ctx.fillStyle = '#ffd60a';
           ctx.fillRect(0, h - 44, w, 7);
           ctx.fillStyle = '#dc2626';
@@ -160,22 +199,28 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
 
           for (let i = 0; i < 4; i++) {
             const x = 22 + i * 122;
+            // Sliding stainless metro doors
             ctx.fillStyle = '#94a3b8';
-            ctx.fillRect(x, 42, 48, 130);
+            drawRoundedRect(ctx, x, 42, 48, 128, 6);
+            ctx.fill();
             ctx.fillStyle = '#0f172a';
-            ctx.fillRect(x + 5, 52, 17, 72);
-            ctx.fillRect(x + 26, 52, 17, 72);
-            ctx.fillStyle = 'rgba(186, 230, 253, 0.35)';
-            ctx.fillRect(x + 7, 55, 6, 62);
+            drawRoundedRect(ctx, x + 5, 50, 17, 74, 4);
+            ctx.fill();
+            drawRoundedRect(ctx, x + 26, 50, 17, 74, 4);
+            ctx.fill();
+            ctx.fillStyle = 'rgba(186, 230, 253, 0.42)';
+            ctx.fillRect(x + 7, 54, 6, 62);
 
-            ctx.fillStyle = '#0f172a';
-            ctx.fillRect(x + 56, 50, 58, 70);
-            ctx.fillStyle = 'rgba(125, 211, 252, 0.28)';
+            // Recessed tinted coach window with diagonal glass glint
+            ctx.fillStyle = '#0b1222';
+            drawRoundedRect(ctx, x + 56, 48, 58, 72, 8);
+            ctx.fill();
+            ctx.fillStyle = 'rgba(125, 211, 252, 0.34)';
             ctx.beginPath();
-            ctx.moveTo(x + 60, 116);
-            ctx.lineTo(x + 84, 54);
-            ctx.lineTo(x + 98, 54);
-            ctx.lineTo(x + 74, 116);
+            ctx.moveTo(x + 61, 115);
+            ctx.lineTo(x + 84, 52);
+            ctx.lineTo(x + 98, 52);
+            ctx.lineTo(x + 75, 115);
             ctx.closePath();
             ctx.fill();
           }
@@ -184,7 +229,7 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
           ctx.font = '900 22px "Noto Sans Kannada", Fredoka, sans-serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(`ನಮ್ಮ ಮೆಟ್ರೋ • ${label}`, w / 2, h - 62);
+          ctx.fillText(`ನಮ್ಮ ಮೆಟ್ರೋ • ${label}`, w / 2, h - 63);
         },
         maxAnisotropy,
       ),
@@ -193,40 +238,72 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
   const trainSidePurple = makeTrainSide('#7B2CBF', 'PURPLE LINE');
   const trainSideGreen = makeTrainSide('#2DC653', 'GREEN LINE');
 
-  const makeTrainFront = (stripe: string, destKn: string, destEn: string) =>
+  // Glossy BEML train nose with glowing bilingual LED destination header
+  const makeTrainFront = (stripe: string, destEn: string, destKn: string) =>
     reg(
       makeCanvasTex(
         256,
         256,
         (ctx, w, h) => {
-          ctx.fillStyle = '#f1f5f9';
+          const grad = ctx.createLinearGradient(0, 0, 0, h);
+          grad.addColorStop(0, '#ffffff');
+          grad.addColorStop(0.55, '#e2e8f0');
+          grad.addColorStop(1, '#cbd5e1');
+          ctx.fillStyle = grad;
           ctx.fillRect(0, 0, w, h);
 
-          // Top Karnataka flag strip on train brow
+          // Top Karnataka flag brow strip
           ctx.fillStyle = '#ffd60a';
           ctx.fillRect(0, 0, w, 9);
           ctx.fillStyle = '#dc2626';
           ctx.fillRect(0, 9, w, 9);
 
-          ctx.fillStyle = '#111827';
-          drawRoundedRect(ctx, 18, 24, w - 36, 128, 22);
+          // Aerodynamic black cab bezel
+          ctx.fillStyle = '#0b1020';
+          drawRoundedRect(ctx, 16, 22, w - 32, 134, 24);
           ctx.fill();
 
-          ctx.fillStyle = '#1e293b';
-          drawRoundedRect(ctx, 28, 58, w - 56, 84, 12);
-          ctx.fill();
-
-          ctx.fillStyle = 'rgba(147, 197, 253, 0.32)';
-          ctx.fillRect(40, 66, 42, 68);
-
+          // Glowing orange-gold LED destination matrix
           ctx.fillStyle = '#050811';
-          ctx.fillRect(36, 30, w - 72, 24);
+          drawRoundedRect(ctx, 28, 29, w - 56, 30, 6);
+          ctx.fill();
+          ctx.strokeStyle = '#334155';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
           ctx.fillStyle = '#ffd60a';
-          ctx.font = 'bold 12px "Noto Sans Kannada", monospace';
+          ctx.font = '900 12px "Noto Sans Kannada", monospace';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(`${destKn} · ${destEn}`, w / 2, 42, w - 80);
+          ctx.fillText(`${destEn} / ${destKn}`, w / 2, 44, w - 66);
 
+          // Recessed panoramic cab windshield with Fortnite-style stylized specular slash
+          const windGrad = ctx.createLinearGradient(0, 62, 0, 148);
+          windGrad.addColorStop(0, '#1e3a5f');
+          windGrad.addColorStop(1, '#0f172a');
+          ctx.fillStyle = windGrad;
+          drawRoundedRect(ctx, 26, 63, w - 52, 84, 14);
+          ctx.fill();
+
+          ctx.fillStyle = 'rgba(186, 230, 253, 0.45)';
+          ctx.beginPath();
+          ctx.moveTo(40, 142);
+          ctx.lineTo(78, 67);
+          ctx.lineTo(106, 67);
+          ctx.lineTo(68, 142);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+          ctx.beginPath();
+          ctx.moveTo(114, 142);
+          ctx.lineTo(152, 67);
+          ctx.lineTo(164, 67);
+          ctx.lineTo(126, 142);
+          ctx.closePath();
+          ctx.fill();
+
+          // Bold Metro line chevron nose stripe
           ctx.fillStyle = stripe;
           ctx.fillRect(0, 160, w, 36);
           ctx.fillStyle = '#ffd60a';
@@ -237,15 +314,16 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
           ctx.fillRect(0, 212, w, 44);
 
           ctx.fillStyle = '#ffffff';
-          ctx.font = 'bold 20px "Noto Sans Kannada", Fredoka, sans-serif';
+          ctx.font = '900 20px "Noto Sans Kannada", Fredoka, sans-serif';
           ctx.fillText('ನಮ್ಮ ಮೆಟ್ರೋ', w / 2, 179);
         },
         maxAnisotropy,
       ),
     );
 
-  const trainFrontPurple = makeTrainFront('#7B2CBF', 'ಮೆಜೆಸ್ಟಿಕ್', 'MAJESTIC');
-  const trainFrontGreen = makeTrainFront('#2DC653', 'ಜಯನಗರ', 'JAYANAGAR');
+  const trainFrontPurple = makeTrainFront('#7B2CBF', 'WHITEFIELD', 'ವೈಟ್‌ಫೀಲ್ಡ್');
+  const trainFrontGreen = makeTrainFront('#2DC653', 'SILK INSTITUTE', 'ಸಿಲ್ಕ್ ಇನ್ಸ್ಟಿಟ್ಯೂಟ್');
+  const trainFrontMajestic = makeTrainFront('#7B2CBF', 'MAJESTIC', 'ಮೆಜೆಸ್ಟಿಕ್');
 
   const bbmpHazard = reg(
     makeCanvasTex(
@@ -316,12 +394,73 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
     ),
   );
 
+  const pillarHazard = reg(
+    makeCanvasTex(
+      128,
+      256,
+      (ctx, w, h) => {
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(0, 0, w, h);
+        // Yellow-black warning chevron collar at eye height
+        ctx.fillStyle = '#ffd60a';
+        ctx.fillRect(0, h * 0.42, w, h * 0.24);
+        ctx.fillStyle = '#1a1423';
+        for (let y = h * 0.42 - 32; y < h * 0.66 + 32; y += 26) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(w, y + 18);
+          ctx.lineTo(w, y + 30);
+          ctx.lineTo(0, y + 12);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.fillStyle = '#7b2cbf';
+        ctx.fillRect(0, 0, w, 24);
+        ctx.fillStyle = '#dc2626';
+        ctx.fillRect(0, 24, w, 12);
+      },
+      maxAnisotropy,
+    ),
+  );
+
+  const mysteryBox = reg(
+    makeCanvasTex(
+      256,
+      256,
+      (ctx, w, h) => {
+        const grad = ctx.createLinearGradient(0, 0, w, h);
+        grad.addColorStop(0, '#7b2cbf');
+        grad.addColorStop(0.5, '#5b21b6');
+        grad.addColorStop(1, '#3b0764');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.strokeStyle = '#ffd60a';
+        ctx.lineWidth = 20;
+        ctx.strokeRect(10, 10, w - 20, h - 20);
+
+        ctx.strokeStyle = '#00f5d4';
+        ctx.lineWidth = 6;
+        ctx.strokeRect(26, 26, w - 52, h - 52);
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = '900 132px "Titan One", Fredoka, sans-serif';
+        ctx.strokeStyle = '#1a1423';
+        ctx.lineWidth = 14;
+        ctx.strokeText('?', w / 2, h / 2 + 8);
+        ctx.fillStyle = '#ffd60a';
+        ctx.fillText('?', w / 2, h / 2 + 8);
+      },
+      maxAnisotropy,
+    ),
+  );
+
   const tunnelSign = reg(
     makeCanvasTex(
       512,
       160,
       (ctx, w, h) => {
-        // Karnataka Yellow-over-Red top accent inside tunnel sign
         ctx.fillStyle = '#1a1423';
         ctx.fillRect(0, 0, w, h);
         ctx.fillStyle = '#ffd60a';
@@ -351,7 +490,6 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
       256,
       160,
       (ctx, w, h) => {
-        // Authentic Karnataka Haldi-Kumkuma (Yellow top, Crimson Red bottom) flag
         ctx.fillStyle = '#ffd60a';
         ctx.fillRect(0, 0, w, h / 2);
         ctx.fillStyle = '#dc2626';
@@ -380,7 +518,6 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
       768,
       220,
       (ctx, w, h) => {
-        // Iconic Arishina-Kunkuma (Yellow + Crimson Red) Bengaluru overhead welcome arch
         ctx.fillStyle = '#ffd60a';
         ctx.fillRect(0, 0, w, h / 2);
         ctx.fillStyle = '#dc2626';
@@ -389,14 +526,11 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
         ctx.strokeStyle = '#1a1423';
         ctx.lineWidth = 14;
         ctx.strokeRect(7, 7, w - 14, h - 14);
-
-        // Decorative divider bar
         ctx.fillStyle = '#1a1423';
         ctx.fillRect(14, h / 2 - 4, w - 28, 8);
 
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-
         ctx.fillStyle = '#1a1423';
         ctx.font = '900 54px "Noto Sans Kannada", Fredoka, sans-serif';
         ctx.fillText('ಸಿರಿಗನ್ನಡಂ ಗೆಲ್ಗೆ • ನಮ್ಮ ಬೆಂಗಳೂರು', w / 2, h * 0.27, w - 56);
@@ -415,11 +549,52 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
       128,
       (ctx, w, h) => {
         const grad = ctx.createRadialGradient(w / 2, h / 2, 8, w / 2, h / 2, w / 2);
-        grad.addColorStop(0, 'rgba(15, 10, 28, 0.72)');
-        grad.addColorStop(0.55, 'rgba(15, 10, 28, 0.34)');
-        grad.addColorStop(1, 'rgba(15, 10, 28, 0)');
+        grad.addColorStop(0, 'rgba(12, 8, 24, 0.78)');
+        grad.addColorStop(0.55, 'rgba(12, 8, 24, 0.36)');
+        grad.addColorStop(1, 'rgba(12, 8, 24, 0)');
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
+      },
+      1,
+    ),
+  );
+
+  // Soft radial fake-bloom additive glow sprite texture (headlights, halos, thrusters, glints)
+  const glowSprite = reg(
+    makeCanvasTex(
+      128,
+      128,
+      (ctx, w, h) => {
+        const grad = ctx.createRadialGradient(w / 2, h / 2, 2, w / 2, h / 2, w / 2);
+        grad.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+        grad.addColorStop(0.25, 'rgba(255, 255, 255, 0.75)');
+        grad.addColorStop(0.6, 'rgba(255, 255, 255, 0.22)');
+        grad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+      },
+      1,
+    ),
+  );
+
+  // Volumetric headlight light-cone texture
+  const lightCone = reg(
+    makeCanvasTex(
+      128,
+      256,
+      (ctx, w, h) => {
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, 'rgba(255, 248, 196, 0.65)');
+        grad.addColorStop(0.45, 'rgba(255, 240, 160, 0.24)');
+        grad.addColorStop(1, 'rgba(255, 240, 160, 0.0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(w * 0.34, 0);
+        ctx.lineTo(w * 0.66, 0);
+        ctx.lineTo(w * 0.98, h);
+        ctx.lineTo(w * 0.02, h);
+        ctx.closePath();
+        ctx.fill();
       },
       1,
     ),
@@ -430,17 +605,55 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
       256,
       512,
       (ctx, w, h) => {
-        ctx.fillStyle = '#1e3a5f';
+        const grad = ctx.createLinearGradient(0, 0, w, h);
+        grad.addColorStop(0, '#16385c');
+        grad.addColorStop(1, '#0f2540');
+        ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
         for (let y = 12; y < h; y += 28) {
           for (let x = 10; x < w - 10; x += 26) {
-            const lit = (x * 13 + y * 7) % 5 === 0;
-            ctx.fillStyle = lit ? '#bae6fd' : '#334155';
+            const hash = (x * 13 + y * 7) % 7;
+            ctx.fillStyle =
+              hash === 0 ? '#bae6fd' : hash === 3 ? '#fef08a' : '#2c4c70';
             ctx.fillRect(x, y, 18, 18);
           }
-          ctx.fillStyle = '#0f172a';
+          ctx.fillStyle = '#0a1829';
           ctx.fillRect(0, y + 20, w, 4);
         }
+      },
+      maxAnisotropy,
+    ),
+  );
+
+  // Colorful Bengaluru Indiranagar / Jayanagar shopfront building texture
+  const shopfrontFacade = reg(
+    makeCanvasTex(
+      256,
+      512,
+      (ctx, w, h) => {
+        ctx.fillStyle = '#f59e6c';
+        ctx.fillRect(0, 0, w, h);
+
+        // Upper apartment balconies
+        for (let y = 24; y < h - 140; y += 54) {
+          ctx.fillStyle = '#fef3c7';
+          ctx.fillRect(16, y, w - 32, 34);
+          ctx.fillStyle = '#1e293b';
+          ctx.fillRect(26, y + 6, 46, 22);
+          ctx.fillRect(w - 72, y + 6, 46, 22);
+          ctx.fillStyle = '#0ea5e9';
+          ctx.fillRect(16, y + 28, w - 32, 8);
+        }
+
+        // Ground-level Darshini / Cafe striped awning
+        ctx.fillStyle = '#1a1423';
+        ctx.fillRect(0, h - 125, w, 125);
+        for (let x = 0; x < w; x += 32) {
+          ctx.fillStyle = (x / 32) % 2 === 0 ? '#dc2626' : '#ffd60a';
+          ctx.fillRect(x, h - 125, 32, 26);
+        }
+        ctx.fillStyle = '#fef08a';
+        ctx.fillRect(22, h - 86, w - 44, 62);
       },
       maxAnisotropy,
     ),
@@ -464,7 +677,6 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
           ctx.fillStyle = '#1a1423';
           ctx.fillRect(0, 0, w, h);
 
-          // Karnataka Yellow & Red pride strip across top
           ctx.fillStyle = '#ffd60a';
           ctx.fillRect(8, 8, w - 16, 12);
           ctx.fillStyle = '#dc2626';
@@ -504,12 +716,10 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
         768,
         384,
         (ctx, w, h) => {
-          // Bold poster background
           ctx.fillStyle = ad.bg;
           ctx.fillRect(0, 0, w, h);
 
-          // Subtle diagonal comic speed bands
-          ctx.fillStyle = 'rgba(255,255,255,0.07)';
+          ctx.fillStyle = 'rgba(255,255,255,0.08)';
           for (let sx = -120; sx < w + 120; sx += 96) {
             ctx.beginPath();
             ctx.moveTo(sx, 0);
@@ -520,18 +730,15 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
             ctx.fill();
           }
 
-          // Karnataka Yellow + Red outer comic frame
           ctx.strokeStyle = '#1a1423';
           ctx.lineWidth = 22;
           ctx.strokeRect(11, 11, w - 22, h - 22);
 
-          // Top & bottom bold poster ribbons
           ctx.fillStyle = ad.stripe;
           ctx.fillRect(22, 22, w - 44, 24);
           ctx.fillStyle = ad.accent;
           ctx.fillRect(22, h - 46, w - 44, 24);
 
-          // Tilted comic sticker badge in top-right corner
           ctx.save();
           ctx.translate(w - 148, 72);
           ctx.rotate(-0.08);
@@ -551,7 +758,6 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
           ctx.fillText(ad.badge, -3, -3, 200);
           ctx.restore();
 
-          // Huge bold outlined headline
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.font = '900 58px "Noto Sans Kannada", Fredoka, sans-serif';
@@ -562,7 +768,6 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
           ctx.fillStyle = '#ffffff';
           ctx.fillText(ad.headline, w / 2, h / 2 - 24, w - 76);
 
-          // High-contrast bilingual punchline bar
           ctx.fillStyle = '#1a1423';
           drawRoundedRect(ctx, 42, h / 2 + 26, w - 84, 74, 16);
           ctx.fill();
@@ -584,13 +789,19 @@ export function createTextureLibrary(maxAnisotropy: number): TextureLibrary {
     trainSideGreen,
     trainFrontPurple,
     trainFrontGreen,
+    trainFrontMajestic,
     bbmpHazard,
     mindTheGap,
+    pillarHazard,
+    mysteryBox,
     tunnelSign,
     kannadaFlag,
     kannadaArchSign,
     contactShadow,
+    glowSprite,
+    lightCone,
     techFacade,
+    shopfrontFacade,
     getStationSign,
     createBillboard,
     dispose: () => {

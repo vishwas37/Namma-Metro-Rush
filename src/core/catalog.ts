@@ -1,10 +1,23 @@
 export type MetroLine = 'purple' | 'green' | 'yellow' | 'interchange';
 export type ZoneMode = 'elevated' | 'underground';
 export type WeatherMode = 'sunny' | 'light_rain' | 'heavy_monsoon';
-export type PowerUpType = 'kaapi' | 'magnet' | 'drone';
-export type UpgradeKey = 'kaapi' | 'magnet' | 'drone' | 'hoverboard';
+export type PowerUpType =
+  | 'kaapi'
+  | 'magnet'
+  | 'drone'
+  | 'sneakers'
+  | 'multiplier'
+  | 'mystery_box';
+export type UpgradeKey =
+  | 'kaapi'
+  | 'magnet'
+  | 'drone'
+  | 'hoverboard'
+  | 'sneakers'
+  | 'multiplier';
 export type CharacterId = 'techie' | 'skater' | 'auto_anna' | 'kaapi_master';
-export type HoverboardId = 'classic_auto' | 'bmtc_volvo' | 'startup_unicorn';
+export type HoverboardId = 'classic_auto' | 'bmtc_volvo' | 'startup_unicorn' | 'namma_zap';
+export type HoverboardPerk = 'super_jump' | 'smooth_drift' | 'double_jump' | 'zap_sideways';
 export type GraphicsQuality = 'high' | 'eco';
 
 export const WEATHER_META: Record<
@@ -14,6 +27,29 @@ export const WEATHER_META: Record<
   sunny: { label: 'Sunny', labelKn: 'ಬಿಸಿಲು', slippery: false },
   light_rain: { label: 'Light Rain', labelKn: 'ಸಣ್ಣ ಮಳೆ', slippery: false },
   heavy_monsoon: { label: 'Heavy Monsoon', labelKn: 'ಭಾರೀ ಮಳೆ', slippery: true },
+};
+
+export const PERK_LABELS: Record<HoverboardPerk, { name: string; desc: string; color: string }> = {
+  super_jump: {
+    name: 'SUPER JUMP',
+    desc: 'Vault directly onto Namma Metro train roofs',
+    color: '#FFD60A',
+  },
+  smooth_drift: {
+    name: 'SMOOTH DRIFT',
+    desc: 'Aero-glide softly while airborne',
+    color: '#38BDF8',
+  },
+  double_jump: {
+    name: 'DOUBLE JUMP',
+    desc: 'Trigger a second boost jump mid-air',
+    color: '#FF70A6',
+  },
+  zap_sideways: {
+    name: 'ZAP SIDEWAYS',
+    desc: 'Instant electric teleport lane switches',
+    color: '#00F5D4',
+  },
 };
 
 export interface MetroStation {
@@ -64,13 +100,13 @@ export const ELEVATED_STATIONS: MetroStation[] = [
     subKn: 'ಟೆಕ್ ಕಾರಿಡಾರ್ ನಿಲ್ದಾಣ',
   },
   {
-    id: 'baiyappanahalli',
-    nameEn: 'Baiyappanahalli',
-    nameKn: 'ಬೈಯಪ್ಪನಹಳ್ಳಿ',
-    line: 'purple',
+    id: 'lalbagh',
+    nameEn: 'Lalbagh',
+    nameKn: 'ಲಾಲ್‌ಬಾಗ್',
+    line: 'green',
     zone: 'elevated',
-    subEn: 'Doors will open on the left',
-    subKn: 'ಬಾಗಿಲುಗಳು ಎಡಭಾಗದಲ್ಲಿ ತೆರೆಯುತ್ತವೆ',
+    subEn: 'Botanical Garden Viaduct',
+    subKn: 'ಲಾಲ್‌ಬಾಗ್ ಉದ್ಯಾನ ನಿಲ್ದಾಣ',
   },
   {
     id: 'silk_board',
@@ -204,6 +240,7 @@ export interface HoverboardSpec {
   id: HoverboardId;
   name: string;
   tagline: string;
+  perk: HoverboardPerk;
   cost: number;
   accentHex: string;
   primaryColor: number;
@@ -215,7 +252,8 @@ export const HOVERBOARDS: HoverboardSpec[] = [
   {
     id: 'classic_auto',
     name: 'Turbo Auto-Rickshaw',
-    tagline: 'Green & yellow hovering auto with horn blast',
+    tagline: 'Green & yellow hovering auto · Super Jump springs',
+    perk: 'super_jump',
     cost: 0,
     accentHex: '#FFD60A',
     primaryColor: 0x1e9b4b,
@@ -225,7 +263,8 @@ export const HOVERBOARDS: HoverboardSpec[] = [
   {
     id: 'bmtc_volvo',
     name: 'BMTC Volvo Mini',
-    tagline: 'Vajra blue AC aero-sled with twin turbines',
+    tagline: 'Vajra blue AC aero-sled · Smooth Drift glide',
+    perk: 'smooth_drift',
     cost: 220,
     accentHex: '#0EA5E9',
     primaryColor: 0x0284c7,
@@ -235,12 +274,24 @@ export const HOVERBOARDS: HoverboardSpec[] = [
   {
     id: 'startup_unicorn',
     name: 'Startup Unicorn',
-    tagline: 'Series-C violet rocket board with gold fins',
+    tagline: 'Series-C violet rocket · Mid-Air Double Jump',
+    perk: 'double_jump',
     cost: 420,
     accentHex: '#A855F7',
     primaryColor: 0x7b2cbf,
     secondaryColor: 0xffd60a,
     glowColor: 0xff70a6,
+  },
+  {
+    id: 'namma_zap',
+    name: 'Namma Zap Rail',
+    tagline: 'Neon BMRCL hyper-blade · Zap Sideways instant blink',
+    perk: 'zap_sideways',
+    cost: 580,
+    accentHex: '#00F5D4',
+    primaryColor: 0x0f172a,
+    secondaryColor: 0x00f5d4,
+    glowColor: 0x00f5d4,
   },
 ];
 
@@ -257,7 +308,7 @@ export interface UpgradeSpec {
 export const UPGRADES: UpgradeSpec[] = [
   {
     key: 'kaapi',
-    name: 'Filter Kaapi Boost',
+    name: 'Filter Kaapi Overdrive',
     description: 'Longer invincible brass-tumbler hyper-dash',
     baseDuration: 5.5,
     perLevelBonus: 1.25,
@@ -266,30 +317,48 @@ export const UPGRADES: UpgradeSpec[] = [
   },
   {
     key: 'magnet',
-    name: 'Masala Dosa Magnet',
-    description: 'Pulls Metro Tokens across all 3 lanes longer',
-    baseDuration: 8.0,
-    perLevelBonus: 1.75,
+    name: 'UPI Coin Magnet',
+    description: 'Pulls Metro Tokens across all 3 lanes along curved arcs',
+    baseDuration: 9.0,
+    perLevelBonus: 1.8,
     maxLevel: 5,
     baseCost: 70,
   },
   {
     key: 'drone',
-    name: 'Startup Drone Flight',
-    description: 'Soar higher & longer collecting aerial arcs',
-    baseDuration: 7.0,
+    name: 'Bengaluru Tech Drone',
+    description: 'Soar above viaduct collecting sky coin ribbons',
+    baseDuration: 7.5,
     perLevelBonus: 1.5,
     maxLevel: 5,
     baseCost: 90,
   },
   {
-    key: 'hoverboard',
-    name: 'Auto Hoverboard Shield',
-    description: 'Extended hoverboard ride & quicker recharge',
+    key: 'sneakers',
+    name: 'Super Sneakers',
+    description: 'Leap straight onto Namma Metro train roofs',
     baseDuration: 10.0,
     perLevelBonus: 2.0,
     maxLevel: 5,
     baseCost: 75,
+  },
+  {
+    key: 'multiplier',
+    name: '2x Score Multiplier',
+    description: 'Doubles live score multiplier with golden flame',
+    baseDuration: 11.0,
+    perLevelBonus: 2.0,
+    maxLevel: 5,
+    baseCost: 85,
+  },
+  {
+    key: 'hoverboard',
+    name: 'Auto Hoverboard Shield',
+    description: '30s crash-absorbing shockwave board & quicker recharge',
+    baseDuration: 30.0,
+    perLevelBonus: 3.0,
+    maxLevel: 5,
+    baseCost: 95,
   },
 ];
 
@@ -304,9 +373,25 @@ export interface BillboardAd {
 
 export const BILLBOARDS: BillboardAd[] = [
   {
-    headline: 'STUCK AT SILK BOARD?',
-    sub: 'ಬೇಗ ಹೋಗು! TAKE NAMMA METRO!',
-    badge: 'ETA: 2045',
+    headline: 'PEAK HOUR? NOT ON METRO!',
+    sub: 'ಬೇಗ ಹೋಗು! ZERO TRAFFIC ON PURPLE LINE',
+    badge: 'NAMMA METRO',
+    bg: '#7B2CBF',
+    accent: '#FFD60A',
+    stripe: '#00F5D4',
+  },
+  {
+    headline: 'FILTER KAAPI EXPRESS',
+    sub: 'ಬಿಸಿ ಬಿಸಿ ಕಾಫಿ • DARSHINI TURBO BOOST',
+    badge: 'DEGREE 100%',
+    bg: '#78350F',
+    accent: '#FDE047',
+    stripe: '#DC2626',
+  },
+  {
+    headline: 'SILK BOARD JAM BYPASSED',
+    sub: 'ಸಿಲ್ಕ್ ಬೋರ್ಡ್ ಜಾಮ್ ಇಲ್ಲ • FLYOVER EXPRESS!',
+    badge: 'ETA: NOW',
     bg: '#DC2626',
     accent: '#FFD60A',
     stripe: '#FFD60A',
@@ -331,17 +416,9 @@ export const BILLBOARDS: BillboardAd[] = [
     headline: 'KORAMANGALA 1BHK RENT:',
     sub: '1 KIDNEY + 10 MONTHS DEPOSIT!',
     badge: 'NO BACHELORS',
-    bg: '#7B2CBF',
+    bg: '#4C1D95',
     accent: '#FFD60A',
     stripe: '#DC2626',
-  },
-  {
-    headline: 'THIS MEETING COULD BE',
-    sub: 'ಒಂದು ಬೈ-ಟು ಫಿಲ್ಟರ್ ಕಾಫಿ! (BY-2 KAAPI)',
-    badge: 'WFH MACHA',
-    bg: '#0F172A',
-    accent: '#FF70A6',
-    stripe: '#FFD60A',
   },
   {
     headline: 'SWALPA ADJUST MAADI!',
@@ -360,20 +437,12 @@ export const BILLBOARDS: BillboardAd[] = [
     stripe: '#FFD60A',
   },
   {
-    headline: 'HOT DEGREE FILTER KAAPI',
-    sub: 'ಬಿಸಿ ಬಿಸಿ ಕಾಫಿ • DARSHINI WI-FI',
-    badge: 'NEXT EXIT',
-    bg: '#78350F',
-    accent: '#FDE047',
-    stripe: '#DC2626',
-  },
-  {
-    headline: 'FOUNDER SEEKING CO-FOUNDER',
-    sub: 'MUST OWN FLAT NEAR METRO STATION',
-    badge: 'HSR LAYOUT',
-    bg: '#4C1D95',
-    accent: '#FFD60A',
-    stripe: '#2DC653',
+    headline: 'THIS MEETING COULD BE',
+    sub: 'ಒಂದು ಬೈ-ಟು ಫಿಲ್ಟರ್ ಕಾಫಿ! (BY-2 KAAPI)',
+    badge: 'WFH MACHA',
+    bg: '#0F172A',
+    accent: '#FF70A6',
+    stripe: '#FFD60A',
   },
   {
     headline: 'ಸಿರಿಗನ್ನಡಂ ಗೆಲ್ಗೆ! NAMMA BLR',
@@ -464,7 +533,10 @@ export function createMissionsForTier(tier: number): DailyMission[] {
     },
     {
       id: `skill_${s}`,
-      label: s % 2 === 1 ? `Grab ${s} Filter Kaapi Boost${s > 1 ? 's' : ''}` : `Pull off ${2 + s} Close Calls`,
+      label:
+        s % 2 === 1
+          ? `Grab ${s} Filter Kaapi Boost${s > 1 ? 's' : ''}`
+          : `Pull off ${2 + s} Close Calls`,
       metric: s % 2 === 1 ? 'kaapi' : 'closeCalls',
       target: s % 2 === 1 ? s : 2 + s,
       progress: 0,
@@ -488,6 +560,8 @@ export function createDefaultProfile(): PlayerProfile {
       magnet: 1,
       drone: 1,
       hoverboard: 1,
+      sneakers: 1,
+      multiplier: 1,
     },
     missionTier: 1,
     missions: createMissionsForTier(1),

@@ -5,6 +5,7 @@ import {
   createMissionsForTier,
   type CharacterId,
   type HoverboardId,
+  type HoverboardPerk,
   type PlayerProfile,
   type UpgradeKey,
   type WeatherMode,
@@ -15,15 +16,21 @@ export const LANE_POSITIONS = [-3.1, 0, 3.1] as const;
 export const TRAIN_ROOF_Y = 3.05;
 export const DRONE_FLIGHT_Y = 6.2;
 export const GRAVITY = -48;
-export const JUMP_VELOCITY = 17.2;
-export const FAST_FALL_VELOCITY = -36;
-export const ROLL_DURATION = 0.65;
-export const COYOTE_TIME = 0.11;
-export const INPUT_BUFFER_TIME = 0.14;
-export const STUMBLE_CHASE_WINDOW = 7.5;
+export const JUMP_VELOCITY = 17.6;
+export const SNEAKERS_JUMP_VELOCITY = 24.4;
+export const DOUBLE_JUMP_VELOCITY = 16.2;
+export const FAST_FALL_VELOCITY = -38;
+export const ROLL_DURATION = 0.62;
+export const COYOTE_TIME = 0.12;
+export const INPUT_BUFFER_TIME = 0.16;
+export const STUMBLE_CHASE_WINDOW = 8.0;
 export const HOVERBOARD_COOLDOWN = 14.0;
+export const HEADSTART_WINDOW = 3.2;
+export const HEADSTART_DISTANCE = 250;
 export const ZONE_DISTANCE_INTERVAL = 720;
 export const WEATHER_CYCLE_DISTANCE = 200;
+export const FIXED_DT = 1 / 120;
+export const MAX_FRAME_DT = 0.05;
 
 export type RunnerAction = 'none' | 'left' | 'right' | 'jump' | 'roll';
 
@@ -44,7 +51,6 @@ export interface CameraFraming {
 export function computeCameraFraming(width: number, height: number): CameraFraming {
   const aspect = width / Math.max(1, height);
   if (aspect < 0.72) {
-    // Tall mobile portrait (e.g. 9:19.5 iPhone / Android)
     return {
       fov: 76,
       chaseZ: 11.4,
@@ -55,7 +61,6 @@ export function computeCameraFraming(width: number, height: number): CameraFrami
     };
   }
   if (aspect < 1.05) {
-    // Square / tablet portrait
     return {
       fov: 68,
       chaseZ: 9.8,
@@ -65,7 +70,6 @@ export function computeCameraFraming(width: number, height: number): CameraFrami
       lobbyLookY: 1.32,
     };
   }
-  // Landscape desktop / tablet
   return {
     fov: 60,
     chaseZ: 8.5,
@@ -108,8 +112,10 @@ export interface PlayerKinematics {
   lane: number;
   lastSafeLane: number;
   x: number;
+  prevX: number;
   vx: number;
   y: number;
+  prevY: number;
   vy: number;
   grounded: boolean;
   coyoteTimer: number;
@@ -121,7 +127,14 @@ export interface PlayerKinematics {
   scaleY: number;
   scaleZ: number;
   laneChangeCooldown: number;
+  laneFromX: number;
+  laneTargetX: number;
+  laneTransitionElapsed: number;
+  laneTransitionDuration: number;
+  airJumpsRemaining: number;
   droneActive: boolean;
+  sneakersActive: boolean;
+  activeBoardPerk: HoverboardPerk | null;
 }
 
 export function createInitialPlayerKinematics(): PlayerKinematics {
@@ -129,8 +142,10 @@ export function createInitialPlayerKinematics(): PlayerKinematics {
     lane: 1,
     lastSafeLane: 1,
     x: 0,
+    prevX: 0,
     vx: 0,
     y: 0,
+    prevY: 0,
     vy: 0,
     grounded: true,
     coyoteTimer: COYOTE_TIME,
@@ -142,7 +157,14 @@ export function createInitialPlayerKinematics(): PlayerKinematics {
     scaleY: 1,
     scaleZ: 1,
     laneChangeCooldown: 0,
+    laneFromX: 0,
+    laneTargetX: 0,
+    laneTransitionElapsed: 1,
+    laneTransitionDuration: 0.118,
+    airJumpsRemaining: 0,
     droneActive: false,
+    sneakersActive: false,
+    activeBoardPerk: null,
   };
 }
 
@@ -157,30 +179,32 @@ export function resolveSupportHeight(
   playerY: number,
   supports: SupportBox[],
   playerZ = 0,
+  forgivingRoofSnap = false,
 ): number {
   let highest = 0;
+  const snapTolerance = forgivingRoofSnap ? 1.18 : 0.82;
   for (let i = 0; i < supports.length; i++) {
     const s = supports[i];
     const laneCenter = LANE_POSITIONS[s.lane];
-    if (Math.abs(playerX - laneCenter) > 1.38) continue;
+    if (Math.abs(playerX - laneCenter) > 1.42) continue;
 
     if (
       s.isRamp &&
       s.rampStartZ !== undefined &&
       s.rampEndZ !== undefined &&
-      playerZ <= s.rampStartZ + 0.65 &&
-      playerZ >= s.rampEndZ - 0.85
+      playerZ <= s.rampStartZ + 0.72 &&
+      playerZ >= s.rampEndZ - 0.9
     ) {
       const span = Math.max(0.1, s.rampStartZ - s.rampEndZ);
       const t = Math.max(0, Math.min(1, (s.rampStartZ - playerZ) / span));
       const rampY = t * s.topY;
-      if (playerY >= rampY - 1.05) {
+      if (playerY >= rampY - 1.12) {
         highest = Math.max(highest, rampY);
       }
     }
 
-    if (playerZ <= s.zStart + 0.65 && playerZ >= s.zEnd - 0.5) {
-      if (playerY >= s.topY - 0.78) {
+    if (playerZ <= s.zStart + 0.7 && playerZ >= s.zEnd - 0.55) {
+      if (playerY >= s.topY - snapTolerance) {
         highest = Math.max(highest, s.topY);
       }
     }
@@ -190,6 +214,7 @@ export function resolveSupportHeight(
 
 export interface PhysicsStepEvents {
   jumped: boolean;
+  doubleJumped: boolean;
   landed: boolean;
   slammed: boolean;
   rolled: boolean;
@@ -198,7 +223,7 @@ export interface PhysicsStepEvents {
 
 export interface WeatherPhysicsProfile {
   slippery: boolean;
-  lateralStiffness: number;
+  laneDuration: number;
   springStiffness: number;
   springDamping: number;
   slideImpulse: number;
@@ -208,7 +233,7 @@ export function getWeatherPhysicsProfile(weather: WeatherMode): WeatherPhysicsPr
   if (weather === 'heavy_monsoon') {
     return {
       slippery: true,
-      lateralStiffness: 12.5,
+      laneDuration: 0.145,
       springStiffness: 78,
       springDamping: 10.6,
       slideImpulse: 2.2,
@@ -217,7 +242,7 @@ export function getWeatherPhysicsProfile(weather: WeatherMode): WeatherPhysicsPr
   if (weather === 'light_rain') {
     return {
       slippery: false,
-      lateralStiffness: 17.5,
+      laneDuration: 0.125,
       springStiffness: 0,
       springDamping: 0,
       slideImpulse: 0,
@@ -225,11 +250,17 @@ export function getWeatherPhysicsProfile(weather: WeatherMode): WeatherPhysicsPr
   }
   return {
     slippery: false,
-    lateralStiffness: 20,
+    laneDuration: 0.115,
     springStiffness: 0,
     springDamping: 0,
     slideImpulse: 0,
   };
+}
+
+/** Smooth cubic-out ease with crisp Subway Surfers snap */
+function easeOutCubic(t: number): number {
+  const inv = 1 - t;
+  return 1 - inv * inv * inv;
 }
 
 export function stepPlayerPhysics(
@@ -240,14 +271,22 @@ export function stepPlayerPhysics(
 ): PhysicsStepEvents {
   const events: PhysicsStepEvents = {
     jumped: false,
+    doubleJumped: false,
     landed: false,
     slammed: false,
     rolled: false,
     switchedLane: 0,
   };
 
-  const clampedDt = Math.min(dt, 0.05);
+  const clampedDt = Math.min(dt, MAX_FRAME_DT);
+  state.prevX = state.x;
+  state.prevY = state.y;
+
   const weatherPhys = getWeatherPhysicsProfile(weather);
+  const zapSideways = state.activeBoardPerk === 'zap_sideways';
+  const superJump = state.sneakersActive || state.activeBoardPerk === 'super_jump';
+  const hasDoubleJump = state.activeBoardPerk === 'double_jump';
+  const smoothDrift = state.activeBoardPerk === 'smooth_drift';
 
   if (state.bufferTimer > 0) {
     state.bufferTimer -= clampedDt;
@@ -261,12 +300,17 @@ export function stepPlayerPhysics(
     state.lastSafeLane = state.lane;
   }
 
+  // Full mid-air & ground snappy lane switching (allows rapid corner-cutting and double-swipes across all 3 lanes)
   if (state.bufferedAction === 'left' && state.laneChangeCooldown <= 0) {
     if (state.lane > 0) {
       state.lastSafeLane = state.lane;
       state.lane -= 1;
-      state.laneChangeCooldown = weatherPhys.slippery ? 0.11 : 0.09;
-      if (weatherPhys.slippery && state.grounded && !state.droneActive) {
+      state.laneChangeCooldown = zapSideways ? 0.04 : weatherPhys.slippery ? 0.1 : 0.075;
+      state.laneFromX = state.x;
+      state.laneTargetX = LANE_POSITIONS[state.lane];
+      state.laneTransitionElapsed = 0;
+      state.laneTransitionDuration = zapSideways ? 0.04 : weatherPhys.laneDuration;
+      if (weatherPhys.slippery && state.grounded && !state.droneActive && !zapSideways) {
         state.vx -= weatherPhys.slideImpulse;
       }
       events.switchedLane = -1;
@@ -277,8 +321,12 @@ export function stepPlayerPhysics(
     if (state.lane < 2) {
       state.lastSafeLane = state.lane;
       state.lane += 1;
-      state.laneChangeCooldown = weatherPhys.slippery ? 0.11 : 0.09;
-      if (weatherPhys.slippery && state.grounded && !state.droneActive) {
+      state.laneChangeCooldown = zapSideways ? 0.04 : weatherPhys.slippery ? 0.1 : 0.075;
+      state.laneFromX = state.x;
+      state.laneTargetX = LANE_POSITIONS[state.lane];
+      state.laneTransitionElapsed = 0;
+      state.laneTransitionDuration = zapSideways ? 0.04 : weatherPhys.laneDuration;
+      if (weatherPhys.slippery && state.grounded && !state.droneActive && !zapSideways) {
         state.vx += weatherPhys.slideImpulse;
       }
       events.switchedLane = 1;
@@ -288,9 +336,10 @@ export function stepPlayerPhysics(
   }
 
   const targetX = LANE_POSITIONS[state.lane];
-  if (weatherPhys.slippery && state.grounded && !state.droneActive) {
-    // Slightly slippery Heavy Monsoon track: wet lateral momentum & subtle hydroplane drift
-    const acc = (targetX - state.x) * weatherPhys.springStiffness - state.vx * weatherPhys.springDamping;
+  if (weatherPhys.slippery && state.grounded && !state.droneActive && !zapSideways) {
+    // Slightly slippery Heavy Monsoon track: wet lateral momentum & controlled drift inside viaduct bounds
+    const acc =
+      (targetX - state.x) * weatherPhys.springStiffness - state.vx * weatherPhys.springDamping;
     state.vx += acc * clampedDt;
     state.x = Math.max(-3.55, Math.min(3.55, state.x + state.vx * clampedDt));
     if (Math.abs(targetX - state.x) < 0.015 && Math.abs(state.vx) < 0.08) {
@@ -298,14 +347,23 @@ export function stepPlayerPhysics(
       state.vx = 0;
     }
   } else {
-    const lateralAlpha = 1 - Math.exp(-weatherPhys.lateralStiffness * clampedDt);
+    // Snappy Subway Surfers eased lane curve (~0.115s, or 0.04s with Zap Sideways)
     const prevX = state.x;
-    state.x += (targetX - state.x) * lateralAlpha;
+    if (state.laneTransitionElapsed < state.laneTransitionDuration) {
+      state.laneTransitionElapsed = Math.min(
+        state.laneTransitionDuration,
+        state.laneTransitionElapsed + clampedDt,
+      );
+      const t = Math.min(1, state.laneTransitionElapsed / Math.max(0.001, state.laneTransitionDuration));
+      state.x = state.laneFromX + (targetX - state.laneFromX) * easeOutCubic(t);
+    } else {
+      state.x = targetX;
+    }
     state.vx = clampedDt > 0 ? (state.x - prevX) / clampedDt : 0;
   }
 
   if (state.droneActive) {
-    const flyAlpha = 1 - Math.exp(-8 * clampedDt);
+    const flyAlpha = 1 - Math.exp(-8.5 * clampedDt);
     state.y += (DRONE_FLIGHT_Y - state.y) * flyAlpha;
     state.vy = 0;
     state.grounded = false;
@@ -320,38 +378,55 @@ export function stepPlayerPhysics(
 
   if (state.grounded) {
     state.coyoteTimer = COYOTE_TIME;
+    state.airJumpsRemaining = hasDoubleJump ? 1 : 0;
   } else {
     state.coyoteTimer = Math.max(0, state.coyoteTimer - clampedDt);
   }
 
-  if (state.bufferedAction === 'jump' && (state.grounded || state.coyoteTimer > 0)) {
-    state.vy = JUMP_VELOCITY;
-    state.grounded = false;
-    state.coyoteTimer = 0;
-    state.rolling = false;
-    state.rollTimer = 0;
-    state.scaleX = 0.82;
-    state.scaleY = 1.24;
-    state.scaleZ = 0.82;
-    state.bufferedAction = 'none';
-    state.bufferTimer = 0;
-    events.jumped = true;
+  // Jump (including instant Roll-to-Jump cancel and mid-air Double Jump board perk)
+  if (state.bufferedAction === 'jump') {
+    if (state.grounded || state.coyoteTimer > 0) {
+      state.vy = superJump ? SNEAKERS_JUMP_VELOCITY : JUMP_VELOCITY;
+      state.grounded = false;
+      state.coyoteTimer = 0;
+      state.rolling = false;
+      state.rollTimer = 0;
+      state.scaleX = 0.8;
+      state.scaleY = 1.26;
+      state.scaleZ = 0.8;
+      state.bufferedAction = 'none';
+      state.bufferTimer = 0;
+      events.jumped = true;
+    } else if (hasDoubleJump && state.airJumpsRemaining > 0) {
+      state.vy = DOUBLE_JUMP_VELOCITY;
+      state.airJumpsRemaining -= 1;
+      state.rolling = false;
+      state.rollTimer = 0;
+      state.scaleX = 0.82;
+      state.scaleY = 1.22;
+      state.scaleZ = 0.82;
+      state.bufferedAction = 'none';
+      state.bufferTimer = 0;
+      events.jumped = true;
+      events.doubleJumped = true;
+    }
   }
 
+  // Roll or instant Jump-to-Roll fast-fall slam
   if (state.bufferedAction === 'roll') {
-    if (!state.grounded && state.y > 0.25) {
+    if (!state.grounded && state.y > 0.22) {
       state.vy = FAST_FALL_VELOCITY;
-      state.scaleX = 0.86;
+      state.scaleX = 0.85;
       state.scaleY = 1.18;
-      state.scaleZ = 0.86;
+      state.scaleZ = 0.85;
       events.slammed = true;
       state.bufferedAction = 'roll';
-      state.bufferTimer = 0.24;
+      state.bufferTimer = 0.26;
     } else {
       state.rolling = true;
       state.rollTimer = ROLL_DURATION;
       state.scaleX = 1.24;
-      state.scaleY = 0.62;
+      state.scaleY = 0.6;
       state.scaleZ = 1.18;
       state.bufferedAction = 'none';
       state.bufferTimer = 0;
@@ -369,19 +444,23 @@ export function stepPlayerPhysics(
 
   const prevGrounded = state.grounded;
   const prevVy = state.vy;
-  state.vy += GRAVITY * clampedDt;
+  // Smooth Drift board perk gently slows falling descent (unless fast-fall slamming)
+  const effectiveGravity =
+    smoothDrift && state.vy < 0 && state.vy > FAST_FALL_VELOCITY * 0.75 ? GRAVITY * 0.52 : GRAVITY;
+  state.vy += effectiveGravity * clampedDt;
   state.y += state.vy * clampedDt;
 
-  const supportY = resolveSupportHeight(state.x, state.y, supports, 0);
+  const supportY = resolveSupportHeight(state.x, state.y, supports, 0, superJump);
   if (state.y <= supportY && state.vy <= 0) {
     state.y = supportY;
     state.vy = 0;
     state.grounded = true;
+    state.airJumpsRemaining = hasDoubleJump ? 1 : 0;
     if (!prevGrounded) {
       events.landed = true;
       const hardLand = prevVy < -24;
-      state.scaleX = hardLand ? 1.3 : 1.2;
-      state.scaleY = hardLand ? 0.72 : 0.8;
+      state.scaleX = hardLand ? 1.32 : 1.2;
+      state.scaleY = hardLand ? 0.7 : 0.8;
       state.scaleZ = hardLand ? 1.26 : 1.18;
       if (state.bufferedAction === 'roll') {
         state.rolling = true;
@@ -412,7 +491,8 @@ export type HazardKind =
   | 'train_moving'
   | 'barrier_jump'
   | 'barricade_bbmp'
-  | 'gantry_low';
+  | 'gantry_low'
+  | 'pillar_narrow';
 
 export interface HazardCollider {
   id: number;
@@ -448,12 +528,12 @@ export function evaluateHazardInteraction(
   const laneX = LANE_POSITIONS[hazard.lane];
   const dx = Math.abs(ctx.playerX - laneX);
   const isTrain = hazard.kind.startsWith('train');
+  const isPillar = hazard.kind === 'pillar_narrow';
   const playerHalfWidth = 0.48;
-  const hazardHalfWidth = isTrain ? 1.24 : 1.08;
+  const hazardHalfWidth = isTrain ? 1.24 : isPillar ? 0.62 : 1.08;
   const playerHeight = ctx.playerRolling ? 0.92 : 1.85;
   const playerTop = ctx.playerY + playerHeight;
 
-  // Solid front of train (for train_ramp, solid body begins after the climbable ramp)
   const effectiveFrontZ =
     hazard.kind === 'train_ramp' && hazard.rampLength
       ? hazard.zStart - hazard.rampLength
@@ -466,11 +546,13 @@ export function evaluateHazardInteraction(
       : effectiveFrontZ;
   const prevBackZ = hazard.prevZEnd ?? hazard.zEnd;
 
-  // Swept Z-overlap check prevents high-speed moving trains or barriers from tunneling past player Z=0
   const playerHalfZ = 0.48;
   const zNowOverlap = effectiveFrontZ >= -playerHalfZ && hazard.zEnd <= playerHalfZ;
   const zSweptThrough = prevEffectiveFrontZ < -playerHalfZ && hazard.zEnd > playerHalfZ;
-  const zSweptFront = prevEffectiveFrontZ <= playerHalfZ && effectiveFrontZ >= -playerHalfZ && prevBackZ <= playerHalfZ;
+  const zSweptFront =
+    prevEffectiveFrontZ <= playerHalfZ &&
+    effectiveFrontZ >= -playerHalfZ &&
+    prevBackZ <= playerHalfZ;
   const zOverlap = zNowOverlap || zSweptThrough || zSweptFront;
 
   if (!zOverlap) {
@@ -505,17 +587,24 @@ export function evaluateHazardInteraction(
     }
     if (ctx.playerY >= hazard.height - 0.15) return 'none';
   } else if (isTrain) {
-    // Standing/landing cleanly on top of the train roof
     if (ctx.playerY >= hazard.height - 0.45) return 'none';
+  } else if (isPillar) {
+    if (ctx.playerY >= hazard.height - 0.25) return 'none';
   } else {
     if (ctx.playerY >= hazard.height - 0.35) return 'none';
   }
 
-  // Only count as a glancing side-stumble if the train nose has clearly passed Z=0 AND player is on the outer side edge
-  const isSideHit = isTrain && dx > hazardHalfWidth - 0.14 && effectiveFrontZ > 1.35 && prevEffectiveFrontZ > 0.7;
+  // Glancing side brush into train side or barrier outer edge triggers side-bump stumble
+  const isTrainSideHit =
+    isTrain &&
+    dx > hazardHalfWidth - 0.18 &&
+    effectiveFrontZ > 1.25 &&
+    prevEffectiveFrontZ > 0.65;
+  const isBarrierEdgeClip =
+    !isTrain && !isPillar && dx > hazardHalfWidth + playerHalfWidth - 0.28;
 
   if (ctx.hoverboardActive) return 'shield_break';
-  if (isSideHit && !ctx.chaserClose) return 'stumble';
+  if ((isTrainSideHit || isBarrierEdgeClip) && !ctx.chaserClose) return 'stumble';
   return 'crash';
 }
 
@@ -531,8 +620,13 @@ export function getWeatherForDistance(distanceMeters: number, zone: ZoneMode): W
   return cycle === 0 ? 'sunny' : cycle === 1 ? 'light_rain' : 'heavy_monsoon';
 }
 
-export function getRunSpeed(distanceMeters: number, kaapiBoostActive: boolean): number {
-  const base = Math.min(44, 21 + distanceMeters * 0.014);
+export function getRunSpeed(
+  distanceMeters: number,
+  kaapiBoostActive: boolean,
+  headstartActive = false,
+): number {
+  const base = Math.min(46, 22 + distanceMeters * 0.0145);
+  if (headstartActive) return Math.max(58, base * 2.15);
   return kaapiBoostActive ? base * 1.65 : base;
 }
 
@@ -554,6 +648,10 @@ export function getUpgradeCost(profile: PlayerProfile, key: UpgradeKey): number 
 export function getEffectiveMultiplier(profile: PlayerProfile): number {
   const completedCount = profile.missions.filter((m) => m.completed).length;
   return Math.max(1, profile.missionTier + Math.floor(completedCount / 3));
+}
+
+export function lerpNumber(a: number, b: number, alpha: number): number {
+  return a + (b - a) * alpha;
 }
 
 export function purchaseOrSelectCharacter(
@@ -630,13 +728,16 @@ export interface RunSummary {
   stationsPassed: number;
   kaapiUsed: number;
   closeCalls: number;
+  mysteryBoxes?: number;
+  mysteryRewardLabel?: string;
+  mysteryBonusTokens?: number;
 }
 
 export function applyRunToProfile(
   profile: PlayerProfile,
   run: RunSummary,
 ): { profile: PlayerProfile; newlyCompletedMissions: string[]; bonusTokens: number } {
-  let bonusTokens = 0;
+  let bonusTokens = run.mysteryBonusTokens ?? 0;
   const newlyCompletedMissions: string[] = [];
 
   const updatedMissions = profile.missions.map((m) => {

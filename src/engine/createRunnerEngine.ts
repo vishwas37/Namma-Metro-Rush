@@ -4,6 +4,7 @@ import { Canvas2DRunnerEngine } from './Canvas2DRunnerEngine';
 import {
   MetroRunnerEngine,
   acquireWebGL2Context,
+  type HudLiveCounters,
   type HudState,
   type RunnerEngine,
 } from './MetroRunnerEngine';
@@ -21,6 +22,7 @@ export function createRunnerEngine(
   sound: SoundEngine,
   onHud: (hud: HudState) => void,
   onRunEnd: (summary: RunSummary) => void,
+  onLiveTick?: (live: HudLiveCounters) => void,
 ): RunnerEngine {
   const params =
     typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
@@ -30,7 +32,15 @@ export function createRunnerEngine(
     const webgl = acquireWebGL2Context(profile.quality === 'high');
     if (webgl) {
       try {
-        return new MetroRunnerEngine(container, profile, sound, onHud, onRunEnd, webgl);
+        return new MetroRunnerEngine(
+          container,
+          profile,
+          sound,
+          onHud,
+          onRunEnd,
+          webgl,
+          onLiveTick,
+        );
       } catch {
         // Clear any partially attached canvas before initializing Canvas2D fallback
         container.innerHTML = '';
@@ -38,5 +48,5 @@ export function createRunnerEngine(
     }
   }
 
-  return new Canvas2DRunnerEngine(container, profile, sound, onHud, onRunEnd);
+  return new Canvas2DRunnerEngine(container, profile, sound, onHud, onRunEnd, onLiveTick);
 }

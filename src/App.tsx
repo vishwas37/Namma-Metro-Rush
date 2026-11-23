@@ -23,7 +23,7 @@ import { createRunnerEngine } from './engine/createRunnerEngine';
 import type { HudState, RunnerEngine } from './engine/MetroRunnerEngine';
 import { SoundEngine } from './engine/sound';
 import { ErrorBoundary } from './ui/ErrorBoundary';
-import { GameHud } from './ui/GameHud';
+import { GameHud, type GameHudHandle } from './ui/GameHud';
 import { GameOverModal, PauseModal } from './ui/Modals';
 import { ShopSheet, type ShopTab } from './ui/ShopSheet';
 import { TitleScreen } from './ui/TitleScreen';
@@ -35,6 +35,7 @@ function createInitialHud(profile: PlayerProfile): HudState {
     distance: 0,
     tokens: 0,
     multiplier: getEffectiveMultiplier(profile),
+    multiplierBoosted: false,
     zone: 'elevated',
     weather: 'sunny',
     currentStation: ELEVATED_STATIONS[0],
@@ -44,6 +45,8 @@ function createInitialHud(profile: PlayerProfile): HudState {
     hoverboardCooldownRatio: 1,
     hoverboardActive: false,
     kaapiActive: false,
+    headstartActive: false,
+    headstartAvailable: false,
     chaserClose: false,
     callout: null,
     voiceOver: null,
@@ -66,6 +69,7 @@ function NammaRunnerApp() {
 
   const mountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<RunnerEngine | null>(null);
+  const hudRef = useRef<GameHudHandle | null>(null);
   const soundRef = useRef<SoundEngine | null>(null);
   const profileRef = useRef<PlayerProfile>(profile);
   const modeRef = useRef(hud.mode);
@@ -135,6 +139,9 @@ function NammaRunnerApp() {
             return updated;
           });
         },
+        (live) => {
+          hudRef.current?.updateLive(live);
+        },
       );
       engineRef.current = engine;
 
@@ -195,6 +202,11 @@ function NammaRunnerApp() {
   const handleActivateHoverboard = useCallback(() => {
     unlockAudio();
     engineRef.current?.activateHoverboard();
+  }, [unlockAudio]);
+
+  const handleActivateHeadstart = useCallback(() => {
+    unlockAudio();
+    engineRef.current?.activateHeadstart();
   }, [unlockAudio]);
 
   const handleTouchAction = useCallback(
@@ -333,6 +345,9 @@ function NammaRunnerApp() {
       } else if (key === ' ' || lower === 'e' || key === 'Shift') {
         e.preventDefault();
         engineRef.current?.activateHoverboard();
+      } else if (lower === 'h') {
+        e.preventDefault();
+        engineRef.current?.activateHeadstart();
       } else if (key === 'Escape' || lower === 'p') {
         e.preventDefault();
         engineRef.current?.pause();
@@ -505,6 +520,7 @@ function NammaRunnerApp() {
       {/* Active Gameplay HUD */}
       {!webglError && hud.mode === 'playing' && (
         <GameHud
+          ref={hudRef}
           hud={hud}
           profile={profile}
           onPause={handlePause}
@@ -512,6 +528,7 @@ function NammaRunnerApp() {
           onToggleAnnouncer={handleToggleAnnouncer}
           onToggleQuality={handleToggleQuality}
           onActivateHoverboard={handleActivateHoverboard}
+          onActivateHeadstart={handleActivateHeadstart}
           onTouchAction={handleTouchAction}
         />
       )}

@@ -201,6 +201,21 @@ export function GameOverModal({
           </div>
         </div>
 
+        {/* Mystery Box Reward Callout */}
+        {hud.runSummary?.mysteryRewardLabel && (
+          <div className="mb-3 p-3 rounded-xl bg-[#2E1A4A] border-2 border-[#C084FC] flex items-center justify-between gap-2">
+            <div>
+              <div className="font-display text-xs text-[#C084FC] tracking-wide">
+                MYSTERY BOX UNLOCKED!
+              </div>
+              <div className="text-xs text-white font-semibold">
+                {hud.runSummary.mysteryRewardLabel}
+              </div>
+            </div>
+            <Sparkles className="w-5 h-5 text-[#FFD60A] shrink-0" />
+          </div>
+        )}
+
         {/* Newly Completed Missions Bonus */}
         {newlyCompletedMissions.length > 0 && (
           <div className="mb-4 p-3 rounded-xl bg-[#163124] border-2 border-[#2DC653]">

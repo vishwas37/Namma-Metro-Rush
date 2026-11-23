@@ -192,23 +192,33 @@ export class SoundEngine {
     const ctx = this.getReadyCtx();
     if (!ctx) return;
     const now = ctx.currentTime;
-    this.tokenStreak = now - this.lastTokenTime > 0.7 ? 0 : Math.min(10, this.tokenStreak + 1);
+    this.tokenStreak = now - this.lastTokenTime > 0.45 ? 0 : Math.min(11, this.tokenStreak + 1);
     this.lastTokenTime = now;
 
-    const scale = [587.33, 659.25, 783.99, 880, 1046.5, 1174.66, 1318.5, 1567.98, 1760, 1975.5, 2093];
-    const freq = scale[this.tokenStreak] ?? 880;
+    // Bright escalating major pentatonic coin combo scale (C5 -> A6)
+    const scale = [
+      523.25, 587.33, 659.25, 783.99, 880.0, 1046.5, 1174.66, 1318.51, 1567.98, 1760.0, 2093.0,
+      2349.32,
+    ];
+    const freq = scale[this.tokenStreak] ?? 1046.5;
     const osc = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
+    osc2.type = 'triangle';
     osc.frequency.setValueAtTime(freq, now);
-    osc.frequency.exponentialRampToValueAtTime(freq * 1.18, now + 0.09);
+    osc.frequency.exponentialRampToValueAtTime(freq * 1.15, now + 0.085);
+    osc2.frequency.setValueAtTime(freq * 2, now);
     gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(0.09, now + 0.012);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    gain.gain.linearRampToValueAtTime(0.085, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.145);
     osc.connect(gain);
+    osc2.connect(gain);
     gain.connect(ctx.destination);
     osc.start(now);
-    osc.stop(now + 0.17);
+    osc2.start(now);
+    osc.stop(now + 0.16);
+    osc2.stop(now + 0.12);
   }
 
   public playWhoosh(pitch = 1): void {
@@ -218,34 +228,34 @@ export class SoundEngine {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(220 * pitch, now);
-    osc.frequency.exponentialRampToValueAtTime(510 * pitch, now + 0.08);
+    osc.frequency.setValueAtTime(240 * pitch, now);
+    osc.frequency.exponentialRampToValueAtTime(560 * pitch, now + 0.075);
     gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(0.065, now + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+    gain.gain.linearRampToValueAtTime(0.068, now + 0.014);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(now);
-    osc.stop(now + 0.12);
+    osc.stop(now + 0.11);
   }
 
-  public playJump(): void {
-    this.haptic(10);
+  public playJump(superBoost = false): void {
+    this.haptic(superBoost ? 16 : 10);
     const ctx = this.getReadyCtx();
     if (!ctx) return;
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(260, now);
-    osc.frequency.exponentialRampToValueAtTime(640, now + 0.14);
+    osc.type = superBoost ? 'triangle' : 'sine';
+    osc.frequency.setValueAtTime(superBoost ? 310 : 260, now);
+    osc.frequency.exponentialRampToValueAtTime(superBoost ? 920 : 640, now + (superBoost ? 0.19 : 0.14));
     gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(0.1, now + 0.018);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    gain.gain.linearRampToValueAtTime(superBoost ? 0.12 : 0.1, now + 0.018);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + (superBoost ? 0.22 : 0.16));
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(now);
-    osc.stop(now + 0.18);
+    osc.stop(now + (superBoost ? 0.24 : 0.18));
   }
 
   public playRoll(): void {
@@ -256,15 +266,126 @@ export class SoundEngine {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(330, now);
-    osc.frequency.exponentialRampToValueAtTime(125, now + 0.12);
+    osc.frequency.setValueAtTime(340, now);
+    osc.frequency.exponentialRampToValueAtTime(118, now + 0.12);
     gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(0.085, now + 0.015);
+    gain.gain.linearRampToValueAtTime(0.088, now + 0.014);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(now);
     osc.stop(now + 0.15);
+  }
+
+  public playFastFallThud(): void {
+    this.haptic(14);
+    const ctx = this.getReadyCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(175, now);
+    osc.frequency.exponentialRampToValueAtTime(52, now + 0.11);
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.14);
+  }
+
+  public playShockwave(): void {
+    this.haptic([25, 20, 35]);
+    const ctx = this.getReadyCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(420, now);
+    osc.frequency.exponentialRampToValueAtTime(58, now + 0.34);
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.38);
+  }
+
+  public playHeadstart(): void {
+    this.haptic([18, 16, 26]);
+    const ctx = this.getReadyCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(180, now);
+    osc.frequency.exponentialRampToValueAtTime(980, now + 0.38);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.11, now + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.45);
+  }
+
+  public playMysteryBox(): void {
+    this.haptic([14, 18, 14, 22]);
+    const ctx = this.getReadyCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    [523.25, 659.25, 783.99, 1046.5, 1318.51].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      const t = now + i * 0.048;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.095, t + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.26);
+    });
+  }
+
+  public playChaseStart(): void {
+    const ctx = this.getReadyCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    // Metro inspector whistle
+    const whistle = ctx.createOscillator();
+    const wGain = ctx.createGain();
+    whistle.type = 'sine';
+    whistle.frequency.setValueAtTime(2480, now);
+    whistle.frequency.linearRampToValueAtTime(2860, now + 0.14);
+    wGain.gain.setValueAtTime(0.001, now);
+    wGain.gain.linearRampToValueAtTime(0.065, now + 0.02);
+    wGain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    whistle.connect(wGain);
+    wGain.connect(ctx.destination);
+    whistle.start(now);
+    whistle.stop(now + 0.24);
+
+    // Playful Bengaluru street dog bark
+    for (const offset of [0.18, 0.34]) {
+      const bark = ctx.createOscillator();
+      const bGain = ctx.createGain();
+      bark.type = 'triangle';
+      bark.frequency.setValueAtTime(420, now + offset);
+      bark.frequency.exponentialRampToValueAtTime(190, now + offset + 0.09);
+      bGain.gain.setValueAtTime(0.001, now + offset);
+      bGain.gain.linearRampToValueAtTime(0.075, now + offset + 0.015);
+      bGain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.11);
+      bark.connect(bGain);
+      bGain.connect(ctx.destination);
+      bark.start(now + offset);
+      bark.stop(now + offset + 0.12);
+    }
   }
 
   public playAutoHorn(): void {

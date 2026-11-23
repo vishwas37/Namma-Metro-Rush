@@ -17,6 +17,8 @@ import {
 } from '../core/catalog';
 import {
   DRONE_FLIGHT_Y,
+  HEADSTART_DISTANCE,
+  HEADSTART_WINDOW,
   HOVERBOARD_COOLDOWN,
   LANE_POSITIONS,
   STUMBLE_CHASE_WINDOW,
@@ -45,6 +47,7 @@ import type {
   ActiveVoiceOver,
   CalloutToast,
   GameMode,
+  HudLiveCounters,
   HudState,
   RunnerEngine,
 } from './MetroRunnerEngine';
@@ -129,6 +132,7 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
   private profile: PlayerProfile;
   private sound: SoundEngine;
   private onHud: (hud: HudState) => void;
+  private onLiveTick?: (live: HudLiveCounters) => void;
   private onRunEnd: (summary: RunSummary) => void;
 
   private player: PlayerKinematics = createInitialPlayerKinematics();
@@ -139,6 +143,12 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
   private stationsPassed = 0;
   private kaapiUsed = 0;
   private closeCalls = 0;
+  private mysteryBoxes = 0;
+  private mysteryBonusTokens = 0;
+  private mysteryRewardLabel = '';
+  private runTime = 0;
+  private headstartActive = false;
+  private headstartTargetDist = 0;
   private lastStationName = 'Indiranagar';
   private gameOverQuip = GAME_OVER_QUIPS[0];
   private runSummary: RunSummary | null = null;
@@ -190,8 +200,12 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
   private magnetDuration = 8.0;
   private droneTimer = 0;
   private droneDuration = 7.0;
+  private sneakersTimer = 0;
+  private sneakersDuration = 11.0;
+  private multiplierTimer = 0;
+  private multiplierDuration = 12.0;
   private hoverboardTimer = 0;
-  private hoverboardDuration = 10.0;
+  private hoverboardDuration = 30.0;
   private hoverboardCooldown = 0;
   private lastHudPush = 0;
 
@@ -204,12 +218,14 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     sound: SoundEngine,
     onHud: (hud: HudState) => void,
     onRunEnd: (summary: RunSummary) => void,
+    onLiveTick?: (live: HudLiveCounters) => void,
   ) {
     this.container = container;
     this.profile = profile;
     this.sound = sound;
     this.onHud = onHud;
     this.onRunEnd = onRunEnd;
+    this.onLiveTick = onLiveTick;
 
     this.canvas = document.createElement('canvas');
     this.canvas.style.display = 'block';
@@ -287,8 +303,16 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     this.kaapiTimer = 0;
     this.magnetTimer = 0;
     this.droneTimer = 0;
+    this.sneakersTimer = 0;
+    this.multiplierTimer = 0;
     this.hoverboardTimer = 0;
     this.hoverboardCooldown = 0;
+    this.mysteryBoxes = 0;
+    this.mysteryBonusTokens = 0;
+    this.mysteryRewardLabel = '';
+    this.runTime = 0;
+    this.headstartActive = false;
+    this.headstartTargetDist = 0;
     this.chaserTimer = 4.2;
     this.stumbleGraceTimer = 0;
     this.stationBannerTimer = 0;
@@ -356,6 +380,20 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     this.spawnBurst(this.player.x, this.player.y + 0.4, 0, '#FFD60A', 16);
     this.showCallout('AUTO BOARD ON! PEE-PEE!', '#FFD60A');
     this.triggerVoiceOver('hoverboard');
+    this.pushHud(true);
+  }
+
+  public activateHeadstart(): void {
+    if (this.mode !== 'playing' || this.crashPending) return;
+    if (this.headstartActive || this.runTime > HEADSTART_WINDOW) return;
+
+    this.headstartActive = true;
+    this.headstartTargetDist = this.distance + HEADSTART_DISTANCE;
+    this.stumbleGraceTimer = Math.max(this.stumbleGraceTimer, 5.2);
+    this.sound.playHeadstart();
+    this.spawnBurst(this.player.x, this.player.y + 1.0, 0, '#FFD60A', 18);
+    this.showCallout('NAMMA EXPRESS HEADSTART!', '#FFD60A');
+    this.triggerVoiceOver('kaapi');
     this.pushHud(true);
   }
 
@@ -512,7 +550,7 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     }
 
     if (Math.random() < 0.34) {
-      const types: PowerUpType[] = ['kaapi', 'magnet', 'drone'];
+      const types: PowerUpType[] = ['kaapi', 'magnet', 'drone', 'sneakers', 'multiplier', 'mystery_box'];
       const pType = types[Math.floor(Math.random() * types.length)];
       const pLane = Math.random() < 0.5 ? laneC : laneB;
       this.powerUps.push({ type: pType, lane: pLane, y: 1.55, z: baseZ - 16, collected: false });
@@ -532,14 +570,32 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
       this.magnetDuration = getPowerUpDuration(this.profile, 'magnet');
       this.magnetTimer = this.magnetDuration;
       this.spawnBurst(this.player.x, this.player.y + 1.2, 0, '#EAB308', 16);
-      this.showCallout('MASALA DOSA MAGNET!', '#EAB308');
-    } else {
+      this.showCallout('UPI COIN MAGNET!', '#EAB308');
+    } else if (type === 'drone') {
       this.droneDuration = getPowerUpDuration(this.profile, 'drone');
       this.droneTimer = this.droneDuration;
       this.player.droneActive = true;
       this.spawnBurst(this.player.x, this.player.y + 1.5, 0, '#00F5D4', 18);
-      this.showCallout('STARTUP DRONE FLIGHT!', '#00F5D4');
+      this.showCallout('BENGALURU TECH DRONE!', '#00F5D4');
       this.spawnTokenLine(1, -22, 10, DRONE_FLIGHT_Y + 0.8, 3.4, 1.0);
+    } else if (type === 'sneakers') {
+      this.sneakersDuration = getPowerUpDuration(this.profile, 'sneakers');
+      this.sneakersTimer = this.sneakersDuration;
+      this.player.sneakersActive = true;
+      this.spawnBurst(this.player.x, this.player.y + 0.8, 0, '#2DC653', 16);
+      this.showCallout('SUPER SNEAKERS!', '#2DC653');
+    } else if (type === 'multiplier') {
+      this.multiplierDuration = getPowerUpDuration(this.profile, 'multiplier');
+      this.multiplierTimer = this.multiplierDuration;
+      this.spawnBurst(this.player.x, this.player.y + 1.2, 0, '#FFD60A', 16);
+      this.showCallout('2X SCORE MULTIPLIER!', '#FFD60A');
+    } else {
+      this.sound.playMysteryBox();
+      this.mysteryBoxes++;
+      this.mysteryBonusTokens += 65;
+      this.mysteryRewardLabel = '+65 Bonus Metro Tokens!';
+      this.spawnBurst(this.player.x, this.player.y + 1.2, 0, '#C084FC', 18);
+      this.showCallout('MYSTERY BOX: +65 TOKENS!', '#C084FC');
     }
     this.triggerVoiceOver(type);
     this.pushHud(true);
@@ -567,6 +623,9 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
       stationsPassed: this.stationsPassed,
       kaapiUsed: this.kaapiUsed,
       closeCalls: this.closeCalls,
+      mysteryBoxes: this.mysteryBoxes > 0 ? this.mysteryBoxes : undefined,
+      mysteryBonusTokens: this.mysteryBonusTokens > 0 ? this.mysteryBonusTokens : undefined,
+      mysteryRewardLabel: this.mysteryRewardLabel || undefined,
     };
     this.runSummary = summary;
     this.onRunEnd(summary);
@@ -597,16 +656,28 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
       return;
     }
 
+    this.runTime += dt;
     if (this.kaapiTimer > 0) {
       this.kaapiTimer = Math.max(0, this.kaapiTimer - dt);
       if (Math.random() < 0.5) this.spawnBurst(this.player.x, this.player.y + 0.9, 0.4, '#F59E0B', 1);
     }
     if (this.magnetTimer > 0) this.magnetTimer = Math.max(0, this.magnetTimer - dt);
+    if (this.sneakersTimer > 0) {
+      this.sneakersTimer = Math.max(0, this.sneakersTimer - dt);
+      this.player.sneakersActive = this.sneakersTimer > 0;
+    } else {
+      this.player.sneakersActive = false;
+    }
+    if (this.multiplierTimer > 0) this.multiplierTimer = Math.max(0, this.multiplierTimer - dt);
     if (this.droneTimer > 0) {
       this.droneTimer = Math.max(0, this.droneTimer - dt);
       this.player.droneActive = this.droneTimer > 0;
     } else {
       this.player.droneActive = false;
+    }
+    if (this.headstartActive && this.distance >= this.headstartTargetDist) {
+      this.headstartActive = false;
+      this.stumbleGraceTimer = Math.max(this.stumbleGraceTimer, 1.2);
     }
 
     if (this.hoverboardTimer > 0) {
@@ -634,12 +705,13 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
     }
     this.cameraTrauma = Math.max(0, this.cameraTrauma - dt * 1.8);
 
-    const speed = getRunSpeed(this.distance, this.kaapiTimer > 0);
+    const speed = getRunSpeed(this.distance, this.kaapiTimer > 0, this.headstartActive);
     const dz = speed * dt;
     this.trackScroll += dz;
     this.distance += dz * 0.55;
-    const mult = getEffectiveMultiplier(this.profile);
-    this.score += dz * mult * (this.kaapiTimer > 0 ? 1.8 : 1.0);
+    const baseMult = getEffectiveMultiplier(this.profile);
+    const mult = this.multiplierTimer > 0 ? baseMult * 2 : baseMult;
+    this.score += dz * mult * (this.kaapiTimer > 0 || this.headstartActive ? 1.8 : 1.0);
 
     if (this.distance >= this.nextStationDist) {
       const list = this.spawnedZone === 'elevated' ? ELEVATED_STATIONS : UNDERGROUND_STATIONS;
@@ -1665,13 +1737,8 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
 
   private pushHud(force: boolean): void {
     if (this.disposed) return;
-    if (!force && this.elapsed - this.lastHudPush < 0.09) return;
-    this.lastHudPush = this.elapsed;
 
     const activePowerUps: ActivePowerUpState[] = [];
-    if (this.kaapiTimer > 0) activePowerUps.push({ type: 'kaapi', remaining: this.kaapiTimer, duration: this.kaapiDuration });
-    if (this.magnetTimer > 0) activePowerUps.push({ type: 'magnet', remaining: this.magnetTimer, duration: this.magnetDuration });
-    if (this.droneTimer > 0) activePowerUps.push({ type: 'drone', remaining: this.droneTimer, duration: this.droneDuration });
     if (this.hoverboardTimer > 0) {
       activePowerUps.push({
         type: 'hoverboard',
@@ -1679,6 +1746,11 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
         duration: this.hoverboardDuration,
       });
     }
+    if (this.kaapiTimer > 0) activePowerUps.push({ type: 'kaapi', remaining: this.kaapiTimer, duration: this.kaapiDuration });
+    if (this.magnetTimer > 0) activePowerUps.push({ type: 'magnet', remaining: this.magnetTimer, duration: this.magnetDuration });
+    if (this.droneTimer > 0) activePowerUps.push({ type: 'drone', remaining: this.droneTimer, duration: this.droneDuration });
+    if (this.sneakersTimer > 0) activePowerUps.push({ type: 'sneakers', remaining: this.sneakersTimer, duration: this.sneakersDuration });
+    if (this.multiplierTimer > 0) activePowerUps.push({ type: 'multiplier', remaining: this.multiplierTimer, duration: this.multiplierDuration });
 
     const maxCd = Math.max(6, HOVERBOARD_COOLDOWN - ((this.profile.upgrades.hoverboard ?? 1) - 1) * 1.4);
     const cdRatio =
@@ -1687,13 +1759,43 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
         : this.hoverboardCooldown <= 0
           ? 1
           : Math.max(0, 1 - this.hoverboardCooldown / maxCd);
+    const baseMult = getEffectiveMultiplier(this.profile);
+    const multiplierBoosted = this.multiplierTimer > 0;
+    const multiplier = multiplierBoosted ? baseMult * 2 : baseMult;
+    const headstartRemaining =
+      this.mode === 'playing' && !this.headstartActive
+        ? Math.max(0, HEADSTART_WINDOW - this.runTime)
+        : 0;
+
+    if (this.onLiveTick && this.mode === 'playing') {
+      this.onLiveTick({
+        score: Math.round(this.score),
+        distance: Math.round(this.distance),
+        tokens: this.runTokens,
+        multiplier,
+        multiplierBoosted,
+        hoverboardReady: this.hoverboardTimer <= 0 && this.hoverboardCooldown <= 0,
+        hoverboardActive: this.hoverboardTimer > 0,
+        hoverboardCooldownRatio: cdRatio,
+        headstartRemaining,
+        headstartActive: this.headstartActive,
+        kaapiActive: this.kaapiTimer > 0,
+        activePowerUps,
+        fps: 60,
+        drawCalls: 1,
+      });
+    }
+
+    if (!force && this.elapsed - this.lastHudPush < 0.45) return;
+    this.lastHudPush = this.elapsed;
 
     this.onHud({
       mode: this.mode,
       score: Math.round(this.score),
       distance: Math.round(this.distance),
       tokens: this.runTokens,
-      multiplier: getEffectiveMultiplier(this.profile),
+      multiplier,
+      multiplierBoosted,
       zone: this.zone,
       weather: this.weather,
       currentStation: this.activeStationBanner,
@@ -1703,6 +1805,8 @@ export class Canvas2DRunnerEngine implements RunnerEngine {
       hoverboardCooldownRatio: cdRatio,
       hoverboardActive: this.hoverboardTimer > 0,
       kaapiActive: this.kaapiTimer > 0,
+      headstartActive: this.headstartActive,
+      headstartAvailable: headstartRemaining > 0,
       chaserClose: this.chaserTimer > 0,
       callout: this.callout,
       voiceOver: this.activeVoiceOver,

@@ -204,3 +204,78 @@ export function DosaMagnetIcon({ className = 'w-6 h-6' }: { className?: string }
     </svg>
   );
 }
+
+export function SuperSneakersIcon({ className = 'w-6 h-6' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 32 32" className={className} fill="none" aria-hidden="true">
+      <path
+        d="M6 19V11H13L16 14H24C26 14 27 15.5 27 17.5V20H6V19Z"
+        fill="#2DC653"
+        stroke="#1A1423"
+        strokeWidth="2.2"
+        strokeLinejoin="round"
+      />
+      <rect x="5" y="20" width="22" height="3.5" rx="1.5" fill="#FFD60A" stroke="#1A1423" strokeWidth="1.8" />
+      <path d="M9 24L11 28M16 24V28M23 24L21 28" stroke="#FFD60A" strokeWidth="2.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function Multiplier2xIcon({ className = 'w-6 h-6' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 32 32" className={className} fill="none" aria-hidden="true">
+      <path
+        d="M16 3L19.6 10.6L28 11.7L21.8 17.5L23.4 25.8L16 21.8L8.6 25.8L10.2 17.5L4 11.7L12.4 10.6L16 3Z"
+        fill="#FFD60A"
+        stroke="#1A1423"
+        strokeWidth="2.2"
+        strokeLinejoin="round"
+      />
+      <text
+        x="16"
+        y="19.5"
+        textAnchor="middle"
+        fontFamily="'Titan One', sans-serif"
+        fontSize="10"
+        fill="#7B2CBF"
+      >
+        2X
+      </text>
+    </svg>
+  );
+}
+
+export function MysteryBoxIcon({ className = 'w-6 h-6' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 32 32" className={className} fill="none" aria-hidden="true">
+      <rect x="5" y="6" width="22" height="20" rx="4" fill="#7B2CBF" stroke="#1A1423" strokeWidth="2.2" />
+      <rect x="5" y="13.5" width="22" height="4.5" fill="#FFD60A" />
+      <rect x="13.8" y="6" width="4.4" height="20" fill="#FFD60A" />
+      <circle cx="16" cy="16" r="5" fill="#1A1423" />
+      <text
+        x="16"
+        y="19.5"
+        textAnchor="middle"
+        fontFamily="'Titan One', sans-serif"
+        fontSize="10"
+        fill="#00F5D4"
+      >
+        ?
+      </text>
+    </svg>
+  );
+}
+
+export function HeadstartIcon({ className = 'w-6 h-6' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 32 32" className={className} fill="none" aria-hidden="true">
+      <path
+        d="M18 3L7 17H15L13 29L25 14H17L18 3Z"
+        fill="#FFD60A"
+        stroke="#1A1423"
+        strokeWidth="2.2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}

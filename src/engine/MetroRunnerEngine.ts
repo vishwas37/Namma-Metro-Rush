@@ -1,25 +1,31 @@
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   BILLBOARDS,
   CLOSE_CALL_QUIPS,
   ELEVATED_STATIONS,
   GAME_OVER_QUIPS,
+  HOVERBOARDS,
   SPEED_BOOST_QUIPS,
   UNDERGROUND_STATIONS,
   type CharacterId,
   type GraphicsQuality,
   type HoverboardId,
+  type HoverboardPerk,
   type MetroStation,
   type PlayerProfile,
   type PowerUpType,
   type WeatherMode,
   type ZoneMode,
 } from '../core/catalog';
+import { selectNextChunk, type LevelChunk } from '../core/chunks';
 import {
   DRONE_FLIGHT_Y,
+  FIXED_DT,
+  HEADSTART_DISTANCE,
+  HEADSTART_WINDOW,
   HOVERBOARD_COOLDOWN,
   LANE_POSITIONS,
+  MAX_FRAME_DT,
   STUMBLE_CHASE_WINDOW,
   TRAIN_ROOF_Y,
   computeCameraFraming,
@@ -29,11 +35,11 @@ import {
   getPowerUpDuration,
   getRunSpeed,
   getWeatherForDistance,
+  lerpNumber,
   queuePlayerAction,
   stepPlayerPhysics,
   type CameraFraming,
   type HazardCollider,
-  type HazardKind,
   type PlayerKinematics,
   type RunSummary,
   type RunnerAction,
@@ -44,21 +50,31 @@ import {
   type VoiceOverEvent,
   type VoiceOverPhrase,
 } from '../core/voiceOver';
-import { SoundEngine } from './sound';
+import { createAssetRegistry, mergeStaticGeometries, type AssetRegistry } from './assets';
 import {
   buildChaserRig,
-  buildObstacleMesh,
-  buildPowerUpMesh,
   buildRunnerRig,
-  buildSkylineBuilding,
-  buildStationStructure,
-  buildTabebuiaTree,
-  buildTokenMesh,
-  buildTrainMesh,
-  buildTunnelPortal,
+  buildSkylineLandmark,
   disposeObject3D,
+  type ChaserRig,
   type RunnerRig,
 } from './meshes';
+import {
+  createEntityPools,
+  type EntityPools,
+  type ObstacleKind,
+  type PooledObstacleSlot,
+  type PooledTrainSlot,
+  type TrainPoolKind,
+} from './pools';
+import {
+  applyCurvedWorldShader,
+  createSkyDome,
+  createWorldShaderUniforms,
+  type SkyDomeRig,
+  type WorldShaderUniforms,
+} from './shaders';
+import { SoundEngine } from './sound';
 import { createTextureLibrary, type TextureLibrary } from './textures';
 
 export type GameMode = 'title' | 'playing' | 'paused' | 'gameover';
@@ -86,6 +102,7 @@ export interface HudState {
   distance: number;
   tokens: number;
   multiplier: number;
+  multiplierBoosted: boolean;
   zone: ZoneMode;
   weather: WeatherMode;
   currentStation: MetroStation | null;
@@ -95,12 +112,35 @@ export interface HudState {
   hoverboardCooldownRatio: number;
   hoverboardActive: boolean;
   kaapiActive: boolean;
+  headstartActive: boolean;
+  headstartAvailable: boolean;
   chaserClose: boolean;
   callout: CalloutToast | null;
   voiceOver: ActiveVoiceOver | null;
   lastStationName: string;
   gameOverQuip: string;
   runSummary: RunSummary | null;
+}
+
+/**
+ * High-frequency live HUD counters pushed straight to DOM refs every frame
+ * with ZERO React tree reconciliation during gameplay!
+ */
+export interface HudLiveCounters {
+  score: number;
+  distance: number;
+  tokens: number;
+  multiplier: number;
+  multiplierBoosted: boolean;
+  hoverboardReady: boolean;
+  hoverboardActive: boolean;
+  hoverboardCooldownRatio: number;
+  headstartRemaining: number;
+  headstartActive: boolean;
+  kaapiActive: boolean;
+  activePowerUps: ActivePowerUpState[];
+  fps: number;
+  drawCalls: number;
 }
 
 export interface RunnerEngine {
@@ -112,6 +152,7 @@ export interface RunnerEngine {
   resume(): void;
   queueAction(action: RunnerAction): void;
   activateHoverboard(): void;
+  activateHeadstart(): void;
   dispose(): void;
 }
 
@@ -122,72 +163,42 @@ export interface AcquiredWebGL2 {
 }
 
 interface ActiveHazard extends HazardCollider {
-  mesh: THREE.Group;
+  trainSlot: PooledTrainSlot | null;
+  obstacleSlot: PooledObstacleSlot | null;
   speedOffset: number;
   active: boolean;
+  zCenter: number;
+  prevZCenter: number;
+  length: number;
 }
 
-interface ActiveToken {
-  mesh: THREE.Group;
+interface SceneryItem {
   x: number;
   y: number;
   z: number;
-  collected: boolean;
+  scaleX: number;
+  scaleY: number;
+  scaleZ: number;
+  rotY: number;
 }
 
-interface ActivePowerUp {
-  mesh: THREE.Group;
-  type: PowerUpType;
-  lane: number;
-  y: number;
+interface CyclingBillboard {
+  group: THREE.Group;
+  side: -1 | 1;
   z: number;
-  collected: boolean;
 }
 
-interface ActiveStation {
-  mesh: THREE.Group;
-  station: MetroStation;
-  z: number;
-  announced: boolean;
-}
-
-interface ActivePortal {
-  mesh: THREE.Group;
-  z: number;
-  targetZone: ZoneMode;
-  passed: boolean;
-}
-
-interface BurstParticle {
-  active: boolean;
-  x: number;
-  y: number;
-  z: number;
-  vx: number;
-  vy: number;
-  vz: number;
-  life: number;
-  maxLife: number;
-  scale: number;
-  color: THREE.Color;
-}
-
-interface WeatherDrop {
-  x: number;
-  y: number;
-  z: number;
-  vy: number;
-  rot: number;
-}
-
+// Module-level scratch objects to guarantee ZERO GC allocations inside the frame loop
 const _dummy = new THREE.Object3D();
-const _colScratch = new THREE.Color();
-const _targetSky = new THREE.Color();
-const _targetFog = new THREE.Color();
-const _elevatedSky = new THREE.Color(0x69c7f8);
-const _lightRainSky = new THREE.Color(0x6888ab);
-const _heavyMonsoonSky = new THREE.Color(0x283a54);
-const _undergroundSky = new THREE.Color(0x0d081a);
+const _colorA = new THREE.Color();
+const _colorB = new THREE.Color();
+const _colorC = new THREE.Color();
+const _camTarget = new THREE.Vector3();
+const _camLook = new THREE.Vector3();
+const _lobbyCamPos = new THREE.Vector3();
+const _lobbyLookPos = new THREE.Vector3();
+const _chaseCamPos = new THREE.Vector3();
+const _chaseLookPos = new THREE.Vector3();
 
 function readWeatherOverride(): WeatherMode | null {
   if (typeof window === 'undefined') return null;
@@ -196,49 +207,38 @@ function readWeatherOverride(): WeatherMode | null {
   return null;
 }
 
-function isSoftwareContext(gl: WebGLRenderingContext | WebGL2RenderingContext | null): boolean {
-  if (!gl) return true;
-  try {
-    const ext = gl.getExtension('WEBGL_debug_renderer_info');
-    const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
-    const gpu = String(gl.getParameter(param) ?? '');
-    return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Acquires a WebGL2 context directly on a fresh canvas BEFORE instantiating
- * THREE.WebGLRenderer so broken Mesa/ANGLE/llvmpipe drivers (e.g. BindToCurrentSequence
- * failures) never trigger Three.js's internal console.error spam and can cleanly fall
- * back to Canvas2DRunnerEngine.
+ * Safely probes and acquires a WebGL2 context BEFORE instantiating
+ * THREE.WebGLRenderer so broken drivers (e.g. Linux Mesa/llvmpipe) cleanly fall
+ * back to Canvas2DRunnerEngine without logging WebGL errors.
  */
 export function acquireWebGL2Context(preferAntialias: boolean): AcquiredWebGL2 | null {
   if (typeof document === 'undefined') return null;
+  const attempts: Array<{ antialias: boolean; powerPreference?: WebGLPowerPreference }> =
+    preferAntialias
+      ? [
+          { antialias: true, powerPreference: 'high-performance' },
+          { antialias: false, powerPreference: 'default' },
+          { antialias: false },
+        ]
+      : [{ antialias: false, powerPreference: 'default' }, { antialias: false }];
 
-  const attempts: Array<{ antialias: boolean; powerPreference?: WebGLPowerPreference }> = [
-    { antialias: preferAntialias, powerPreference: 'default' },
-    { antialias: false },
-  ];
-
-  for (const attempt of attempts) {
+  for (const attrs of attempts) {
     try {
       const canvas = document.createElement('canvas');
-      const attrs: WebGLContextAttributes = {
-        antialias: attempt.antialias,
+      const ctx = canvas.getContext('webgl2', {
         alpha: false,
+        antialias: attrs.antialias,
         depth: true,
         stencil: false,
-        failIfMajorPerformanceCaveat: false,
-        ...(attempt.powerPreference ? { powerPreference: attempt.powerPreference } : {}),
-      };
-      const gl = canvas.getContext('webgl2', attrs) as WebGL2RenderingContext | null;
-      if (gl && !gl.isContextLost()) {
-        return { canvas, context: gl, antialias: attempt.antialias };
+        preserveDrawingBuffer: false,
+        powerPreference: attrs.powerPreference,
+      }) as WebGL2RenderingContext | null;
+      if (ctx && !ctx.isContextLost()) {
+        return { canvas, context: ctx, antialias: attrs.antialias };
       }
     } catch {
-      // Quietly proceed to fallback attempt
+      // Try next profile
     }
   }
   return null;
@@ -249,103 +249,151 @@ export class MetroRunnerEngine implements RunnerEngine {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
-  private framing: CameraFraming;
   private textures: TextureLibrary;
+  private uniforms: WorldShaderUniforms;
+  private skyDome: SkyDomeRig;
+  private assets: AssetRegistry;
+  private pools: EntityPools;
   private sound: SoundEngine;
-  private isSoftwareGl: boolean;
-
-  private sunLight: THREE.DirectionalLight;
-  private hemiLight: THREE.HemisphereLight;
-  private tunnelLight: THREE.PointLight;
-  private fog: THREE.Fog;
-
-  private runnerRig: RunnerRig;
-  private chaserRig: ReturnType<typeof buildChaserRig>;
-  private player: PlayerKinematics = createInitialPlayerKinematics();
+  private onHud: (hud: HudState) => void;
+  private onLiveTick?: (live: HudLiveCounters) => void;
+  private onRunEnd: (summary: RunSummary) => void;
+  private profile: PlayerProfile;
   private currentCharId: CharacterId;
   private currentBoardId: HoverboardId;
-  private profile: PlayerProfile;
+  private currentQuality: GraphicsQuality;
+  private isSoftwareGl = false;
+  private adaptiveQualityStep = 0;
+  private fpsSamples = new Float32Array(30);
+  private fpsSampleIdx = 0;
+  private fpsSampleCount = 0;
+  private currentFps = 60;
+  private currentDrawCalls = 0;
+  private adaptiveCooldown = 0;
 
-  private trackSegments: THREE.Group[] = [];
-  private deckMat: THREE.MeshStandardMaterial | null = null;
-  private tunnelRings: THREE.Group[] = [];
-  private sceneryChunks: THREE.Group[] = [];
-  private clouds: THREE.Group[] = [];
-  private lobbyTrain: THREE.Group;
+  // Lighting
+  private hemiLight: THREE.HemisphereLight;
+  private sunLight: THREE.DirectionalLight;
+  private fog: THREE.Fog;
 
+  // Characters & Lobby Showcase Train
+  private runnerRig: RunnerRig;
+  private chaserRig: ChaserRig;
+  private lobbyTrainMesh: THREE.Group;
+
+  // Compact, heavily instanced static environment (< 25 draw calls total!)
+  private elevatedGroup = new THREE.Group();
+  private undergroundGroup = new THREE.Group();
+  private viaductPierInst!: THREE.InstancedMesh;
+  private viaductPierZ: number[] = [];
+  private flagInst!: THREE.InstancedMesh;
+  private flagItems: Array<{ side: -1 | 1; z: number }> = [];
+  private treeTrunkInst!: THREE.InstancedMesh;
+  private treeBlossomInst!: THREE.InstancedMesh;
+  private treeItems: SceneryItem[] = [];
+  private techTowerInst!: THREE.InstancedMesh;
+  private techTowerItems: SceneryItem[] = [];
+  private shopfrontInst!: THREE.InstancedMesh;
+  private shopfrontItems: SceneryItem[] = [];
+  private cloudInst!: THREE.InstancedMesh;
+  private cloudItems: SceneryItem[] = [];
+  private tunnelRibInst!: THREE.InstancedMesh;
+  private tunnelLightInst!: THREE.InstancedMesh;
+  private tunnelNeonInst!: THREE.InstancedMesh;
+  private tunnelRibZ: number[] = [];
+  private cyclingBillboards: CyclingBillboard[] = [];
+  private billboardBackInst!: THREE.InstancedMesh;
+  private billboardPostInst!: THREE.InstancedMesh;
+  private vidhanaLandmark!: THREE.Group;
+  private ubCityLandmark!: THREE.Group;
+  private roadDashInst!: THREE.InstancedMesh;
+  private roadDashZ: number[] = [];
+
+  // Active gameplay entities (all backed by zero-GC pools)
   private hazards: ActiveHazard[] = [];
-  private tokens: ActiveToken[] = [];
-  private powerUps: ActivePowerUp[] = [];
-  private stations: ActiveStation[] = [];
-  private portals: ActivePortal[] = [];
-  private nextEntityId = 1;
+  private supportsScratch: SupportBox[] = [];
+  private nextHazardId = 1;
+  private lastChunkId: string | null = null;
 
-  private particleMesh: THREE.InstancedMesh;
-  private particles: BurstParticle[] = [];
-  private particleCursor = 0;
-
-  private weatherMesh: THREE.InstancedMesh;
-  private weatherDrops: WeatherDrop[] = [];
-  private weatherOverride: WeatherMode | null = readWeatherOverride();
-
+  // Simulation state
   private mode: GameMode = 'title';
+  private player: PlayerKinematics = createInitialPlayerKinematics();
   private score = 0;
   private distance = 0;
   private runTokens = 0;
   private stationsPassed = 0;
   private kaapiUsed = 0;
   private closeCalls = 0;
+  private mysteryBoxesCollected = 0;
+  private mysteryBonusTokens = 0;
+  private lastMysteryRewardLabel = '';
   private lastStationName = 'Indiranagar';
   private gameOverQuip = GAME_OVER_QUIPS[0];
   private runSummary: RunSummary | null = null;
 
+  // Zone & Weather
   private zone: ZoneMode = 'elevated';
   private spawnedZone: ZoneMode = 'elevated';
   private weather: WeatherMode = 'sunny';
+  private weatherOverride: WeatherMode | null = readWeatherOverride();
+  private weatherBlend = 0; // 0 = sunny, 0.5 = light_rain, 1.0 = heavy_monsoon
+  private rainIntensity = 0;
   private elevatedIdx = 0;
   private undergroundIdx = 0;
-  private nextWaveZ = -84;
-  private nextStationDist = 210;
-  private nextZoneDist = 720;
+  private nextChunkZ = -34;
+  private nextStationDistance = 175;
+  private nextZoneSwitchDistance = 720;
 
-  private elapsed = 0;
-  private lastTs = 0;
-  private frameHandle = 0;
-  private disposed = false;
-  private contextLost = false;
-  private hitstopTimer = 0;
-  private crashPending = false;
-  private crashDelayTimer = 0;
-  private cameraTrauma = 0;
-  private chaserTimer = 4.2;
-  private stumbleGraceTimer = 0;
-  private lobbyHopTimer = 0;
-
+  // Timers & Power-ups
+  private runTime = 0;
+  private kaapiTimer = 0;
+  private kaapiDuration = 5;
+  private magnetTimer = 0;
+  private magnetDuration = 8;
+  private droneTimer = 0;
+  private droneDuration = 6.5;
+  private sneakersTimer = 0;
+  private sneakersDuration = 11;
+  private multiplierTimer = 0;
+  private multiplierDuration = 12;
+  private hoverboardTimer = 0;
+  private hoverboardDuration = 30;
+  private hoverboardCooldown = 0;
+  private headstartActive = false;
+  private headstartTargetDist = 0;
+  private invincibilityTimer = 0;
+  private chaserTimer = 0;
+  private chaserZ = 7.2;
+  private prevChaserZ = 7.2;
+  private shakeTime = 0;
+  private shakeIntensity = 0;
+  private lobbyWaveTimer = 0;
+  private lobbyTransition = 0; // 0 = lobby camera, 1 = chase camera (0.65s smooth sweep!)
+  private currentStation: MetroStation | null = null;
   private stationBannerTimer = 0;
-  private activeStationBanner: MetroStation | null = null;
   private callout: CalloutToast | null = null;
   private calloutTimer = 0;
   private calloutSeq = 1;
-  private activeVoiceOver: ActiveVoiceOver | null = null;
+  private voiceOver: ActiveVoiceOver | null = null;
   private voiceOverTimer = 0;
   private voiceOverSeq = 1;
-  private lastVoiceOverByEvent: Partial<Record<VoiceOverEvent, string>> = {};
+  private lastVoicePhraseIds: Partial<Record<VoiceOverEvent, string>> = {};
+  private crashTimer = 0;
 
-  private kaapiTimer = 0;
-  private kaapiDuration = 5.5;
-  private magnetTimer = 0;
-  private magnetDuration = 8.0;
-  private droneTimer = 0;
-  private droneDuration = 7.0;
-  private hoverboardTimer = 0;
-  private hoverboardDuration = 10.0;
-  private hoverboardCooldown = 0;
-
-  private onHud: (hud: HudState) => void;
-  private onRunEnd: (summary: RunSummary) => void;
-  private lastHudPush = 0;
+  // Camera & Curve State
+  private currentFov = 60;
+  private framing: CameraFraming = computeCameraFraming(1280, 720);
+  private time = 0;
+  private accumulator = 0;
+  private rafId: number | null = null;
+  private lastFrameMs = 0;
+  private hudSyncTimer = 0;
+  private disposed = false;
   private resizeObserver: ResizeObserver | null = null;
-  private onWindowResizeBound: () => void;
+  private boundOnResize: () => void;
+  private boundOnContextLost: (e: Event) => void;
+  private boundOnContextRestored: () => void;
+  private activePowerUpsScratch: ActivePowerUpState[] = [];
 
   constructor(
     container: HTMLElement,
@@ -353,492 +401,700 @@ export class MetroRunnerEngine implements RunnerEngine {
     sound: SoundEngine,
     onHud: (hud: HudState) => void,
     onRunEnd: (summary: RunSummary) => void,
-    preAcquiredWebGL?: AcquiredWebGL2,
+    webgl: AcquiredWebGL2,
+    onLiveTick?: (live: HudLiveCounters) => void,
   ) {
     this.container = container;
     this.profile = profile;
     this.currentCharId = profile.selectedCharacter;
     this.currentBoardId = profile.selectedHoverboard;
+    this.currentQuality = profile.quality;
     this.sound = sound;
     this.onHud = onHud;
     this.onRunEnd = onRunEnd;
-
-    const w = Math.max(1, container.clientWidth || window.innerWidth);
-    const h = Math.max(1, container.clientHeight || window.innerHeight);
-    this.framing = computeCameraFraming(w, h);
-
-    const webgl = preAcquiredWebGL ?? acquireWebGL2Context(profile.quality === 'high');
-    if (!webgl) {
-      throw new Error('WebGL2 context unavailable on this device.');
-    }
-
-    this.renderer = new THREE.WebGLRenderer({
-      canvas: webgl.canvas,
-      context: webgl.context,
-      antialias: webgl.antialias,
-      alpha: false,
-      depth: true,
-      stencil: false,
-      powerPreference: 'default',
-      failIfMajorPerformanceCaveat: false,
-    });
-    this.isSoftwareGl = isSoftwareContext(this.renderer.getContext());
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
-    this.applyQuality(profile.quality);
-    this.renderer.setSize(w, h);
-    this.renderer.domElement.style.display = 'block';
-    this.renderer.domElement.style.width = '100%';
-    this.renderer.domElement.style.height = '100%';
-    container.appendChild(this.renderer.domElement);
-
-    this.renderer.domElement.addEventListener('webglcontextlost', (e) => {
-      e.preventDefault();
-      this.contextLost = true;
-    });
-    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
-      this.contextLost = false;
-      this.lastTs = performance.now();
-    });
+    this.onLiveTick = onLiveTick;
 
     this.scene = new THREE.Scene();
-    this.scene.background = _elevatedSky.clone();
-    this.fog = new THREE.Fog(0x88d4fc, 48, 175);
+    this.fog = new THREE.Fog(0x7cc8f8, 62, 215);
     this.scene.fog = this.fog;
 
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    pmrem.dispose();
+    const width = Math.max(container.clientWidth, 1);
+    const height = Math.max(container.clientHeight, 1);
+    this.framing = computeCameraFraming(width, height);
+    this.currentFov = this.framing.fov;
+    this.camera = new THREE.PerspectiveCamera(this.framing.fov, width / height, 0.2, 185);
+    this.camera.position.set(0, this.framing.lobbyY, this.framing.lobbyRadius);
 
-    this.camera = new THREE.PerspectiveCamera(this.framing.fov, w / h, 0.2, 240);
+    const { canvas, context, antialias } = webgl;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.display = 'block';
+    canvas.style.touchAction = 'none';
+    this.container.appendChild(canvas);
 
-    this.hemiLight = new THREE.HemisphereLight(0xbbe6ff, 0x4b5563, 1.05);
-    this.hemiLight.position.set(0, 40, 0);
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      context,
+      antialias,
+      powerPreference: 'high-performance',
+      stencil: false,
+    });
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.14;
+    this.renderer.setSize(width, height, false);
+
+    // Detect software WebGL rasterizers (SwiftShader / llvmpipe) to keep rendering fast
+    try {
+      const dbg = context.getExtension('WEBGL_debug_renderer_info');
+      const glRenderer = String(
+        dbg ? context.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : context.getParameter(context.RENDERER),
+      );
+      this.isSoftwareGl = /swiftshader|llvmpipe|softpipe|mesa/i.test(glRenderer);
+    } catch {
+      this.isSoftwareGl = false;
+    }
+
+    this.applyQualitySettings(this.currentQuality);
+
+    this.boundOnContextLost = (e: Event) => e.preventDefault();
+    this.boundOnContextRestored = () => {
+      if (!this.disposed) this.renderer.render(this.scene, this.camera);
+    };
+    canvas.addEventListener('webglcontextlost', this.boundOnContextLost, false);
+    canvas.addEventListener('webglcontextrestored', this.boundOnContextRestored, false);
+
+    // Lighting — punchy Subway Surfers daylight with crisp tight player-tracking directional shadow
+    this.hemiLight = new THREE.HemisphereLight(0xdff4ff, 0x3b6e52, 1.32);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xfff4d6, 1.85);
-    this.sunLight.position.set(18, 32, 16);
-    this.sunLight.castShadow = !this.isSoftwareGl && profile.quality === 'high';
-    this.sunLight.shadow.mapSize.width = 1024;
-    this.sunLight.shadow.mapSize.height = 1024;
-    this.sunLight.shadow.camera.near = 2;
-    this.sunLight.shadow.camera.far = 90;
-    this.sunLight.shadow.camera.left = -22;
-    this.sunLight.shadow.camera.right = 22;
+    this.sunLight = new THREE.DirectionalLight(0xfff4d6, 2.25);
+    this.sunLight.position.set(16, 32, 14);
+    this.sunLight.castShadow = !this.isSoftwareGl && this.currentQuality === 'high';
+    this.sunLight.shadow.mapSize.set(1024, 1024);
+    this.sunLight.shadow.camera.near = 6;
+    this.sunLight.shadow.camera.far = 84;
+    this.sunLight.shadow.camera.left = -16;
+    this.sunLight.shadow.camera.right = 16;
     this.sunLight.shadow.camera.top = 24;
     this.sunLight.shadow.camera.bottom = -24;
     this.sunLight.shadow.bias = -0.0005;
-    this.sunLight.shadow.normalBias = 0.02;
     this.scene.add(this.sunLight);
+    this.scene.add(this.sunLight.target);
 
-    this.tunnelLight = new THREE.PointLight(0xa855f7, 0, 32, 1.6);
-    this.tunnelLight.position.set(0, 5.2, -6);
-    this.scene.add(this.tunnelLight);
-
+    // Core visual registries & pre-allocated zero-GC pools
     this.textures = createTextureLibrary(this.renderer.capabilities.getMaxAnisotropy());
+    this.uniforms = createWorldShaderUniforms();
+    this.skyDome = createSkyDome();
+    this.scene.add(this.skyDome.mesh);
 
-    this.runnerRig = buildRunnerRig(this.currentCharId, this.currentBoardId, this.textures);
+    this.assets = createAssetRegistry(this.textures, this.uniforms);
+    this.pools = createEntityPools(this.scene, this.assets);
+
+    // Compact, instanced environment & landmarks
+    this.buildStaticEnvironment();
+
+    // Sculpted runner, Inspector + Bengaluru street dog, and lobby parked train
+    this.runnerRig = buildRunnerRig(this.currentCharId, this.currentBoardId, this.assets);
     this.scene.add(this.runnerRig.root);
 
-    this.chaserRig = buildChaserRig(this.textures);
-    this.chaserRig.root.position.set(0, 0, 3.8);
-    this.chaserRig.root.visible = false;
+    this.chaserRig = buildChaserRig(this.assets);
     this.scene.add(this.chaserRig.root);
 
-    this.buildTrackPool();
-    this.buildTunnelRingPool();
-    this.buildSceneryPool();
-    this.buildCloudPool();
-
-    this.lobbyTrain = buildTrainMesh('purple', 24, false, this.textures);
-    this.lobbyTrain.position.set(-LANE_POSITIONS[2], 0, -42);
-    this.scene.add(this.lobbyTrain);
-
-    // Zero-GC pooled burst particles
-    const pCount = 110;
-    this.particleMesh = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(0.24, 0.24, 0.24),
-      new THREE.MeshBasicMaterial({ color: 0xffffff }),
-      pCount,
-    );
-    this.particleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.particleMesh.frustumCulled = false;
-    for (let i = 0; i < pCount; i++) {
-      this.particles.push({
-        active: false,
-        x: 0,
-        y: -50,
-        z: 0,
-        vx: 0,
-        vy: 0,
-        vz: 0,
-        life: 0,
-        maxLife: 1,
-        scale: 0,
-        color: new THREE.Color(0xffd60a),
-      });
-      _dummy.position.set(0, -50, 0);
-      _dummy.scale.set(0, 0, 0);
-      _dummy.updateMatrix();
-      this.particleMesh.setMatrixAt(i, _dummy.matrix);
-      this.particleMesh.setColorAt(i, _colScratch.setHex(0xffd60a));
+    // Lobby showcase parked BEML Purple Line train right behind the runner
+    const lobbySlot = this.pools.acquireTrain('train_static', 'purple');
+    if (lobbySlot) {
+      this.lobbyTrainMesh = lobbySlot.mesh;
+      this.lobbyTrainMesh.position.set(LANE_POSITIONS[0], 0, -10.5);
+      this.lobbyTrainMesh.visible = true;
+      // Release back to pool only when run starts, or keep dedicated static lobby placement
+      this.pools.releaseTrain(lobbySlot);
     }
-    this.scene.add(this.particleMesh);
+    // Use a lightweight visual reference to the first pooled static train while in title mode
+    this.lobbyTrainMesh = this.pools.acquireTrain('train_static', 'purple')?.mesh ?? new THREE.Group();
+    this.lobbyTrainMesh.position.set(LANE_POSITIONS[0], 0, -10.5);
 
-    // Weather rain particle pool (Light Rain & Heavy Monsoon)
-    const wCount = 220;
-    this.weatherMesh = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(0.11, 0.56, 0.08),
-      new THREE.MeshBasicMaterial({ color: 0xdbeafe, transparent: true, opacity: 0.78 }),
-      wCount,
-    );
-    this.weatherMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.weatherMesh.frustumCulled = false;
-    this.weatherMesh.visible = false;
-    for (let i = 0; i < wCount; i++) {
-      this.weatherDrops.push({
-        x: (Math.random() - 0.5) * 32,
-        y: Math.random() * 18,
-        z: -Math.random() * 55 + 8,
-        vy: -7 - Math.random() * 6,
-        rot: Math.random() * Math.PI * 2,
-      });
-    }
-    this.scene.add(this.weatherMesh);
+    this.applyWeatherPreset(this.weatherOverride ?? 'sunny');
+    this.positionLobbyActors();
 
+    // Warm up GPU shader programs once on real hardware so first jump/train has zero shader stutter
     if (!this.isSoftwareGl) {
-      this.renderer.compile(this.scene, this.camera);
+      try {
+        this.renderer.compile(this.scene, this.camera);
+      } catch {
+        // Ignore compilation hints on exotic drivers
+      }
     }
 
-    this.onWindowResizeBound = () => this.handleResize();
-    window.addEventListener('resize', this.onWindowResizeBound);
-    window.addEventListener('orientationchange', this.onWindowResizeBound);
+    this.boundOnResize = () => this.handleResize();
+    window.addEventListener('resize', this.boundOnResize);
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => this.handleResize());
       this.resizeObserver.observe(this.container);
     }
 
-    // Immediate Frame 0 draw so first paint is never a blank frame
-    this.stepLobby(0.016);
-    this.renderer.render(this.scene, this.camera);
-
-    this.pushHud(true);
-    this.lastTs = performance.now();
-    this.startLoop();
+    this.emitHud();
+    this.lastFrameMs = performance.now();
+    this.loop(this.lastFrameMs);
   }
 
-  private buildTrackPool(): void {
-    const segLen = 30;
-    const deckMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      map: this.textures.trackBed,
-      roughness: 0.72,
-      metalness: 0.14,
-    });
-    this.deckMat = deckMat;
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.72 });
-    const trimPurpleMat = new THREE.MeshStandardMaterial({ color: 0x7b2cbf, roughness: 0.35, metalness: 0.2 });
-    const trimYellowMat = new THREE.MeshStandardMaterial({ color: 0xffd60a, roughness: 0.35, metalness: 0.15 });
-    const trimRedMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.38, metalness: 0.15 });
-    const poleMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.45, metalness: 0.6 });
-    const flagMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      map: this.textures.kannadaFlag,
-      roughness: 0.45,
-      side: THREE.DoubleSide,
-    });
-    const pierMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.85 });
+  private applyQualitySettings(quality: GraphicsQuality): void {
+    this.currentQuality = quality;
+    const rawDpr = window.devicePixelRatio || 1;
+    const maxDpr = this.isSoftwareGl
+      ? 0.85
+      : quality === 'high'
+        ? this.adaptiveQualityStep === 0
+          ? 1.75
+          : this.adaptiveQualityStep === 1
+            ? 1.35
+            : 1.0
+        : 1.0;
+    this.renderer.setPixelRatio(Math.min(rawDpr, maxDpr));
 
-    for (let i = 0; i < 8; i++) {
-      const seg = new THREE.Group();
-      const deck = new THREE.Mesh(new THREE.BoxGeometry(11.4, 0.7, segLen), deckMat);
-      deck.position.set(0, -0.35, 0);
-      deck.receiveShadow = true;
-      seg.add(deck);
-
-      for (const sx of [-5.85, 5.85]) {
-        const rail = new THREE.Mesh(new THREE.BoxGeometry(0.42, 1.08, segLen), wallMat);
-        rail.position.set(sx, 0.36, 0);
-        const stripeYellow = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.16, segLen), trimYellowMat);
-        stripeYellow.position.set(sx, 0.8, 0);
-        const stripeRed = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.16, segLen), trimRedMat);
-        stripeRed.position.set(sx, 0.64, 0);
-        const stripePurple = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.14, segLen), trimPurpleMat);
-        stripePurple.position.set(sx, 0.48, 0);
-        seg.add(rail, stripeYellow, stripeRed, stripePurple);
-
-        // Festive Karnataka Yellow-Red flag pennants along the elevated viaduct
-        if (i % 2 === 0) {
-          const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 3.1, 8), poleMat);
-          pole.position.set(sx, 2.35, 0);
-          const flag = new THREE.Mesh(new THREE.PlaneGeometry(1.55, 0.96), flagMat);
-          flag.position.set(sx + (sx > 0 ? 0.78 : -0.78), 3.3, 0);
-          flag.rotation.y = sx > 0 ? -0.25 : 0.25;
-          seg.add(pole, flag);
-        }
-      }
-
-      const pier = new THREE.Mesh(new THREE.BoxGeometry(2.6, 14, 2.2), pierMat);
-      pier.position.set(0, -7.7, 0);
-      seg.add(pier);
-
-      seg.position.z = 15 - i * segLen;
-      this.scene.add(seg);
-      this.trackSegments.push(seg);
+    const allowShadows =
+      !this.isSoftwareGl && quality === 'high' && this.adaptiveQualityStep < 2;
+    this.renderer.shadowMap.enabled = allowShadows;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    if (this.sunLight) {
+      this.sunLight.castShadow = allowShadows;
     }
   }
 
-  private buildTunnelRingPool(): void {
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x1e1b2e, roughness: 0.78 });
-    const archMat = new THREE.MeshStandardMaterial({ color: 0x2d2642, roughness: 0.68 });
-    const stripMat = new THREE.MeshStandardMaterial({
-      color: 0xe0f2fe,
-      emissive: 0x7dd3fc,
-      emissiveIntensity: 2.0,
-    });
-    const neonPurple = new THREE.MeshStandardMaterial({
-      color: 0xa855f7,
-      emissive: 0x7b2cbf,
-      emissiveIntensity: 1.8,
-    });
-    const exitGreen = new THREE.MeshStandardMaterial({
-      color: 0x2dc653,
-      emissive: 0x2dc653,
-      emissiveIntensity: 2.2,
-    });
+  /**
+   * Builds a hyper-efficient, curved-world Bengaluru Metro viaduct, underground tunnel,
+   * instanced Tabebuia blossom avenues, instanced skyline & shopfronts, landmarks,
+   * big funny billboards, and parallax clouds (~26 draw calls total!).
+   */
+  private buildStaticEnvironment(): void {
+    // 1. Subdivided continuous curved-world viaduct deck (bends seamlessly with uCurveX/uCurveY!)
+    const trackLen = 220;
+    const deckGeo = new THREE.BoxGeometry(11.5, 0.55, trackLen, 1, 1, 52);
+    const deck = new THREE.Mesh(deckGeo, this.assets.mat.trackDeck);
+    deck.position.set(0, -0.275, -trackLen / 2 + 24);
+    deck.receiveShadow = true;
+    this.scene.add(deck);
 
-    const spacing = 24;
-    for (let i = 0; i < 8; i++) {
-      const ring = new THREE.Group();
-      for (const sx of [-6.35, 6.35]) {
-        const wall = new THREE.Mesh(new THREE.BoxGeometry(0.6, 8.6, spacing + 0.4), wallMat);
-        wall.position.set(sx, 4.1, 0);
-        const neon = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.22, spacing - 1), neonPurple);
-        neon.position.set(sx - Math.sign(sx) * 0.34, 3.2, 0);
-        const rib = new THREE.Mesh(new THREE.BoxGeometry(0.5, 8.2, 1.1), archMat);
-        rib.position.set(sx - Math.sign(sx) * 0.25, 4.1, 0);
-        ring.add(wall, neon, rib);
-      }
-      const ceiling = new THREE.Mesh(new THREE.BoxGeometry(13.4, 0.8, spacing + 0.4), wallMat);
-      ceiling.position.set(0, 8.4, 0);
-      ring.add(ceiling);
-      for (const lx of [-2.8, 2.8]) {
-        const tube = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.16, 12), stripMat);
-        tube.position.set(lx, 7.9, 0);
-        ring.add(tube);
-      }
-      if (i % 2 === 0) {
-        const exitSign = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.55, 1.3), exitGreen);
-        exitSign.position.set(5.98, 2.1, 0);
-        ring.add(exitSign);
-      }
-      ring.position.z = 12 - i * spacing;
-      ring.visible = false;
-      this.scene.add(ring);
-      this.tunnelRings.push(ring);
+    // Side viaduct concrete parapet walls + Kannada yellow/red & Namma Metro purple stripes (merged left+right = 4 DC!)
+    const mergePair = (w: number, h: number, xOff: number, yOff: number) => {
+      const l = new THREE.BoxGeometry(w, h, trackLen, 1, 1, 40);
+      l.translate(-xOff, yOff, -trackLen / 2 + 24);
+      const r = new THREE.BoxGeometry(w, h, trackLen, 1, 1, 40);
+      r.translate(xOff, yOff, -trackLen / 2 + 24);
+      const merged = mergeStaticGeometries([l, r]);
+      l.dispose();
+      r.dispose();
+      return merged;
+    };
+    const wallsMesh = new THREE.Mesh(mergePair(0.65, 1.4, 6.08, 0.58), this.assets.mat.viaductWall);
+    wallsMesh.receiveShadow = true;
+    const stripeYellow = new THREE.Mesh(mergePair(0.18, 0.24, 5.72, 1.04), this.assets.mat.trimYellow);
+    const stripeRed = new THREE.Mesh(mergePair(0.18, 0.24, 5.72, 0.78), this.assets.mat.trimRed);
+    const stripePurple = new THREE.Mesh(mergePair(0.18, 0.24, 5.72, 0.48), this.assets.mat.trimPurple);
+    this.scene.add(wallsMesh, stripeYellow, stripeRed, stripePurple);
+
+    // 2. Elevated Bengaluru World Group (hidden cleanly when underground)
+    this.scene.add(this.elevatedGroup);
+
+    // Ground parks + Outer Ring Road avenue below the elevated viaduct
+    const parkGeo = new THREE.PlaneGeometry(300, 260, 1, 20);
+    const park = new THREE.Mesh(parkGeo, this.assets.mat.groundPark);
+    park.rotation.x = -Math.PI / 2;
+    park.position.set(0, -7.8, -96);
+    const avenueGeo = new THREE.PlaneGeometry(24, 260, 1, 20);
+    const avenue = new THREE.Mesh(avenueGeo, this.assets.mat.groundAvenue);
+    avenue.rotation.x = -Math.PI / 2;
+    avenue.position.set(0, -7.72, -96);
+    this.elevatedGroup.add(park, avenue);
+
+    // Instanced yellow road dashes below viaduct (1 draw call)
+    const dashCount = 24;
+    this.roadDashInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(0.35, 0.08, 4.4),
+      this.assets.mat.roadDash,
+      dashCount,
+    );
+    this.roadDashInst.frustumCulled = false;
+    for (let i = 0; i < dashCount; i++) {
+      this.roadDashZ.push(16 - i * 10);
     }
-  }
+    this.elevatedGroup.add(this.roadDashInst);
 
-  private buildSceneryPool(): void {
-    const spacing = 36;
-    const poleMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.6, metalness: 0.4 });
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0x2f6b47, roughness: 0.92 });
-    const avenueMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.85 });
-    const dashMat = new THREE.MeshStandardMaterial({ color: 0xfef08a, roughness: 0.6 });
+    // Instanced concrete viaduct piers (1 draw call)
+    const pierCount = 16;
+    this.viaductPierInst = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(1.05, 1.35, 8.2, 8),
+      this.assets.mat.viaductPier,
+      pierCount,
+    );
+    this.viaductPierInst.frustumCulled = false;
+    for (let i = 0; i < pierCount; i++) {
+      this.viaductPierZ.push(16 - i * 14);
+    }
+    this.elevatedGroup.add(this.viaductPierInst);
 
-    for (let i = 0; i < 7; i++) {
-      const chunk = new THREE.Group();
+    // Instanced Kannada yellow-red pride flags along the viaduct rim (1 draw call)
+    const flagCount = 20;
+    this.flagInst = new THREE.InstancedMesh(
+      new THREE.PlaneGeometry(1.45, 0.9),
+      this.assets.mat.kannadaFlag,
+      flagCount,
+    );
+    this.flagInst.frustumCulled = false;
+    for (let i = 0; i < flagCount; i++) {
+      const side: -1 | 1 = i % 2 === 0 ? -1 : 1;
+      const z = 12 - Math.floor(i / 2) * 20;
+      this.flagItems.push({ side, z });
+    }
+    this.elevatedGroup.add(this.flagInst);
 
-      const road = new THREE.Mesh(new THREE.PlaneGeometry(18, spacing + 2), avenueMat);
-      road.rotation.x = -Math.PI / 2;
-      road.position.set(0, -9.45, 0);
-      const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 9), dashMat);
-      dash.rotation.x = -Math.PI / 2;
-      dash.position.set(0, -9.4, 0);
-      chunk.add(road, dash);
-
-      for (const side of [-1, 1]) {
-        const park = new THREE.Mesh(new THREE.PlaneGeometry(54, spacing + 2), groundMat);
-        park.rotation.x = -Math.PI / 2;
-        park.position.set(side * 36, -9.5, 0);
-        chunk.add(park);
-
-        const t1 = buildTabebuiaTree();
-        t1.position.set(side * (10.5 + (i % 2) * 2.5), -3.2, -6);
-        const s1 = 1.05 + (i % 3) * 0.14;
-        t1.scale.set(s1, s1, s1);
-        const t2 = buildTabebuiaTree();
-        t2.position.set(side * 14.5, -4.4, 10);
-        t2.scale.set(1.2, 1.24, 1.2);
-        chunk.add(t1, t2);
-
-        const variant =
-          i === 2 && side === 1
-            ? 'vidhana'
-            : (i + (side > 0 ? 1 : 0)) % 2 === 0
-              ? 'tech'
-              : 'apartment';
-        const bldg = buildSkylineBuilding(variant, this.textures);
-        bldg.position.set(side * (variant === 'vidhana' ? 28 : 22 + (i % 3) * 4), -9.5, -2);
-        chunk.add(bldg);
-      }
-
-      // BIGGER, FUNNIER PEAK BENGALURU ROADSIDE BILLBOARDS (12.4 x 6.2 units on twin steel pillars!)
-      const ad = BILLBOARDS[i % BILLBOARDS.length];
-      const bSide = i % 2 === 0 ? -1 : 1;
-      const frameMat = new THREE.MeshStandardMaterial({ color: 0x1a1423, roughness: 0.55, metalness: 0.3 });
-
-      const billboardGroup = new THREE.Group();
-      billboardGroup.position.set(bSide * 12.2, 0, 2.5);
-      billboardGroup.rotation.y = bSide > 0 ? -0.42 : 0.42;
-
-      const pillarL = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.36, 13.0, 8), poleMat);
-      pillarL.position.set(-3.8, -3.0, -0.46);
-      const pillarR = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.36, 13.0, 8), poleMat);
-      pillarR.position.set(3.8, -3.0, -0.46);
-
-      const boardTex = this.textures.createBillboard(ad);
-      const boardFaceMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        map: boardTex,
-        roughness: 0.45,
-        emissive: 0xffffff,
-        emissiveMap: boardTex,
-        emissiveIntensity: 0.08,
+    // Instanced Tabebuia Pink Blossom Trees (2 draw calls total for 36 trees!)
+    const treeCount = 36;
+    this.treeTrunkInst = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.32, 0.5, 4.8, 6),
+      this.assets.mat.treeTrunk,
+      treeCount,
+    );
+    this.treeBlossomInst = new THREE.InstancedMesh(
+      new THREE.DodecahedronGeometry(2.65, 1),
+      this.assets.mat.treeBlossom,
+      treeCount,
+    );
+    this.treeTrunkInst.frustumCulled = false;
+    this.treeBlossomInst.frustumCulled = false;
+    const blossomPalette = [0xff85c0, 0xf472b6, 0xfb7185, 0xf9a8d4, 0xfde047, 0x34d399];
+    for (let i = 0; i < treeCount; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      const scale = 0.85 + (i % 5) * 0.14;
+      this.treeItems.push({
+        x: side * (11.5 + (i % 4) * 3.8),
+        y: -7.8,
+        z: 18 - i * 6.4,
+        scaleX: scale,
+        scaleY: scale * (0.95 + (i % 3) * 0.12),
+        scaleZ: scale,
+        rotY: i * 1.1,
       });
-      const board = new THREE.Mesh(new THREE.BoxGeometry(12.4, 6.2, 0.42), [
-        frameMat,
-        frameMat,
-        frameMat,
-        frameMat,
-        boardFaceMat,
-        boardFaceMat,
-      ]);
-      board.position.set(0, 6.4, 0);
-      billboardGroup.add(pillarL, pillarR, board);
-      chunk.add(billboardGroup);
+      _colorA.setHex(blossomPalette[i % blossomPalette.length]);
+      this.treeBlossomInst.setColorAt(i, _colorA);
+    }
+    if (this.treeBlossomInst.instanceColor) {
+      this.treeBlossomInst.instanceColor.needsUpdate = true;
+    }
+    this.elevatedGroup.add(this.treeTrunkInst, this.treeBlossomInst);
 
-      // GIANT OVERHEAD VIADUCT ARCHES & FUNNY SKY-GANTRY ADS (safely above drone & jump height!)
-      if (i % 2 === 1) {
-        const isKannadaArch = i % 4 === 1;
-        const archPillarMat = new THREE.MeshStandardMaterial({
-          color: isKannadaArch ? 0xdc2626 : 0x334155,
-          roughness: 0.48,
-          metalness: 0.32,
-        });
-        const archTrimMat = new THREE.MeshStandardMaterial({ color: 0xffd60a, roughness: 0.38 });
-        for (const px of [-6.45, 6.45]) {
-          const post = new THREE.Mesh(new THREE.BoxGeometry(0.68, 9.2, 0.68), archPillarMat);
-          post.position.set(px, 4.0, -12);
-          const band = new THREE.Mesh(new THREE.BoxGeometry(0.78, 1.0, 0.78), archTrimMat);
-          band.position.set(px, 5.8, -12);
-          chunk.add(post, band);
-        }
+    // Instanced Bengaluru Tech Glass Towers (1 draw call for 24 towers!)
+    const towerCount = 24;
+    this.techTowerInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      this.assets.mat.techTower,
+      towerCount,
+    );
+    this.techTowerInst.frustumCulled = false;
+    const towerTints = [0xe0f2fe, 0xf3e8ff, 0xede9fe, 0xdbeafe, 0xfef3c7];
+    for (let i = 0; i < towerCount; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      const h = 18 + (i % 6) * 5.2;
+      const w = 7 + (i % 3) * 2.4;
+      this.techTowerItems.push({
+        x: side * (25 + (i % 4) * 7.5),
+        y: -7.8 + h / 2,
+        z: 10 - i * 9.5,
+        scaleX: w,
+        scaleY: h,
+        scaleZ: 7 + (i % 4) * 1.8,
+        rotY: 0,
+      });
+      _colorA.setHex(towerTints[i % towerTints.length]);
+      this.techTowerInst.setColorAt(i, _colorA);
+    }
+    if (this.techTowerInst.instanceColor) {
+      this.techTowerInst.instanceColor.needsUpdate = true;
+    }
+    this.elevatedGroup.add(this.techTowerInst);
 
-        const overheadTex = isKannadaArch
-          ? this.textures.kannadaArchSign
-          : this.textures.createBillboard(BILLBOARDS[(i + 4) % BILLBOARDS.length]);
-        const overheadFace = new THREE.MeshStandardMaterial({
+    // Instanced Warm Bengaluru Shopfronts & Darshini Blocks (1 draw call for 20 blocks!)
+    const shopCount = 20;
+    this.shopfrontInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      this.assets.mat.shopfront,
+      shopCount,
+    );
+    this.shopfrontInst.frustumCulled = false;
+    const shopTints = [0xffedd5, 0xfef08a, 0xfecdd3, 0xd9f99d, 0xfde68a];
+    for (let i = 0; i < shopCount; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      const h = 9 + (i % 4) * 2.6;
+      this.shopfrontItems.push({
+        x: side * (16.5 + (i % 3) * 3.4),
+        y: -7.8 + h / 2,
+        z: 14 - i * 11,
+        scaleX: 6.2 + (i % 3) * 1.2,
+        scaleY: h,
+        scaleZ: 6.4,
+        rotY: 0,
+      });
+      _colorA.setHex(shopTints[i % shopTints.length]);
+      this.shopfrontInst.setColorAt(i, _colorA);
+    }
+    if (this.shopfrontInst.instanceColor) {
+      this.shopfrontInst.instanceColor.needsUpdate = true;
+    }
+    this.elevatedGroup.add(this.shopfrontInst);
+
+    // Iconic Bengaluru Skyline Landmarks (Vidhana Soudha + UB City Twin Towers)
+    this.vidhanaLandmark = buildSkylineLandmark('vidhana', this.assets);
+    this.vidhanaLandmark.position.set(-34, -7.8, -110);
+    this.ubCityLandmark = buildSkylineLandmark('ub_city', this.assets);
+    this.ubCityLandmark.position.set(36, -7.8, -160);
+    this.elevatedGroup.add(this.vidhanaLandmark, this.ubCityLandmark);
+
+    // Big Funny Bilingual Roadside Billboards (6 draw calls total: 1 instanced frame + 1 instanced post + 4 fronts!)
+    const bbCount = 4;
+    this.billboardBackInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(9.2, 4.6, 0.32),
+      this.assets.mat.trimYellow,
+      bbCount,
+    );
+    this.billboardPostInst = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.22, 0.28, 7.6, 6),
+      this.assets.mat.steelPole,
+      bbCount,
+    );
+    this.billboardBackInst.frustumCulled = false;
+    this.billboardPostInst.frustumCulled = false;
+    this.elevatedGroup.add(this.billboardBackInst, this.billboardPostInst);
+
+    const frontPlaneGeo = new THREE.PlaneGeometry(8.9, 4.32);
+    for (let i = 0; i < bbCount; i++) {
+      const bbGroup = new THREE.Group();
+      const side: -1 | 1 = i % 2 === 0 ? -1 : 1;
+      const bb = BILLBOARDS[i % BILLBOARDS.length];
+      const tex = this.textures.createBillboard(bb);
+      const cardMat = applyCurvedWorldShader(
+        new THREE.MeshStandardMaterial({
           color: 0xffffff,
-          map: overheadTex,
-          roughness: 0.44,
-          emissive: 0xffffff,
-          emissiveMap: overheadTex,
-          emissiveIntensity: 0.08,
-        });
-        const overheadBoard = new THREE.Mesh(new THREE.BoxGeometry(14.4, 4.3, 0.48), [
-          frameMat,
-          frameMat,
-          frameMat,
-          frameMat,
-          overheadFace,
-          overheadFace,
-        ]);
-        overheadBoard.position.set(0, 10.75, -12);
-        chunk.add(overheadBoard);
-      }
+          map: tex,
+          roughness: 0.36,
+          emissive: 0x1c1917,
+          emissiveIntensity: 0.25,
+        }),
+        this.uniforms,
+        { rim: true, rimScale: 0.5 },
+      );
+      const cardFront = new THREE.Mesh(frontPlaneGeo, cardMat);
+      cardFront.position.set(0, 5.2, 0.18);
+      bbGroup.add(cardFront);
+      bbGroup.position.set(side * 10.6, 0, -28 - i * 48);
+      bbGroup.rotation.y = side * -0.24;
+      this.elevatedGroup.add(bbGroup);
+      this.cyclingBillboards.push({ group: bbGroup, side, z: -28 - i * 48 });
+    }
 
-      chunk.position.z = 10 - i * spacing;
-      this.scene.add(chunk);
-      this.sceneryChunks.push(chunk);
+    // Parallax Stylized Clouds (1 draw call for 18 clouds!)
+    const cloudCount = 18;
+    this.cloudInst = new THREE.InstancedMesh(
+      new THREE.IcosahedronGeometry(3.8, 1),
+      this.assets.mat.cloudMat,
+      cloudCount,
+    );
+    this.cloudInst.frustumCulled = false;
+    for (let i = 0; i < cloudCount; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      this.cloudItems.push({
+        x: side * (16 + (i % 5) * 14),
+        y: 26 + (i % 4) * 5,
+        z: 10 - i * 14,
+        scaleX: 2.1 + (i % 3) * 0.7,
+        scaleY: 0.68 + (i % 2) * 0.22,
+        scaleZ: 1.3 + (i % 3) * 0.35,
+        rotY: i * 0.7,
+      });
+    }
+    this.elevatedGroup.add(this.cloudInst);
+
+    // 3. Underground Majestic / Cubbon Park Tunnel Group (hidden while elevated!)
+    this.undergroundGroup.visible = false;
+    this.scene.add(this.undergroundGroup);
+
+    const tunnelWallGeo = new THREE.BoxGeometry(0.8, 9.6, trackLen, 1, 1, 36);
+    for (const side of [-1, 1]) {
+      const tWall = new THREE.Mesh(tunnelWallGeo, this.assets.mat.tunnelWall);
+      tWall.position.set(side * 6.5, 4.6, -trackLen / 2 + 24);
+      this.undergroundGroup.add(tWall);
+    }
+    const tCeiling = new THREE.Mesh(
+      new THREE.BoxGeometry(13.8, 0.8, trackLen, 1, 1, 36),
+      this.assets.mat.tunnelWall,
+    );
+    tCeiling.position.set(0, 9.2, -trackLen / 2 + 24);
+    this.undergroundGroup.add(tCeiling);
+
+    const ribCount = 18;
+    this.tunnelRibInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(13.2, 0.55, 0.75),
+      this.assets.mat.tunnelRib,
+      ribCount,
+    );
+    this.tunnelLightInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(3.4, 0.16, 4.6),
+      this.assets.mat.tunnelLightStrip,
+      ribCount,
+    );
+    this.tunnelNeonInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(0.18, 0.34, 7.2),
+      this.assets.mat.tunnelNeonPurple,
+      ribCount * 2,
+    );
+    this.tunnelRibInst.frustumCulled = false;
+    this.tunnelLightInst.frustumCulled = false;
+    this.tunnelNeonInst.frustumCulled = false;
+    for (let i = 0; i < ribCount; i++) {
+      this.tunnelRibZ.push(14 - i * 12);
+    }
+    this.undergroundGroup.add(this.tunnelRibInst, this.tunnelLightInst, this.tunnelNeonInst);
+
+    // Populate initial instance transforms
+    this.updateStaticScenery(0);
+  }
+
+  private updateStaticScenery(forwardStep: number): void {
+    // Scroll track bed texture smoothly for continuous crisp rails & sleepers
+    if (forwardStep !== 0) {
+      this.textures.trackBed.offset.y = (this.textures.trackBed.offset.y + forwardStep * 0.16) % 1;
+    }
+
+    if (this.elevatedGroup.visible) {
+      // Road dashes
+      for (let i = 0; i < this.roadDashZ.length; i++) {
+        this.roadDashZ[i] += forwardStep;
+        if (this.roadDashZ[i] > 26) this.roadDashZ[i] -= 240;
+        _dummy.position.set(0, -7.66, this.roadDashZ[i]);
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.scale.set(1, 1, 1);
+        _dummy.updateMatrix();
+        this.roadDashInst.setMatrixAt(i, _dummy.matrix);
+      }
+      this.roadDashInst.instanceMatrix.needsUpdate = true;
+
+      // Viaduct piers
+      for (let i = 0; i < this.viaductPierZ.length; i++) {
+        this.viaductPierZ[i] += forwardStep;
+        if (this.viaductPierZ[i] > 26) this.viaductPierZ[i] -= 224;
+        _dummy.position.set(0, -4.3, this.viaductPierZ[i]);
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.scale.set(1, 1, 1);
+        _dummy.updateMatrix();
+        this.viaductPierInst.setMatrixAt(i, _dummy.matrix);
+      }
+      this.viaductPierInst.instanceMatrix.needsUpdate = true;
+
+      // Kannada yellow-red flags along viaduct parapets
+      const flagWave = Math.sin(this.time * 5.2) * 0.18;
+      for (let i = 0; i < this.flagItems.length; i++) {
+        const f = this.flagItems[i];
+        f.z += forwardStep;
+        if (f.z > 24) f.z -= 200;
+        _dummy.position.set(f.side * 6.28, 2.08, f.z);
+        _dummy.rotation.set(0, f.side * 0.4 + flagWave, 0);
+        _dummy.scale.set(1, 1, 1);
+        _dummy.updateMatrix();
+        this.flagInst.setMatrixAt(i, _dummy.matrix);
+      }
+      this.flagInst.instanceMatrix.needsUpdate = true;
+
+      // Tabebuia pink blossom trees
+      for (let i = 0; i < this.treeItems.length; i++) {
+        const t = this.treeItems[i];
+        t.z += forwardStep;
+        if (t.z > 28) t.z -= 230.4;
+        _dummy.position.set(t.x, t.y + 2.4 * t.scaleY, t.z);
+        _dummy.rotation.set(0, t.rotY, 0);
+        _dummy.scale.set(t.scaleX, t.scaleY, t.scaleZ);
+        _dummy.updateMatrix();
+        this.treeTrunkInst.setMatrixAt(i, _dummy.matrix);
+
+        _dummy.position.set(t.x, t.y + 5.6 * t.scaleY, t.z);
+        _dummy.scale.set(t.scaleX * 1.08, t.scaleY * 0.88, t.scaleZ * 1.08);
+        _dummy.updateMatrix();
+        this.treeBlossomInst.setMatrixAt(i, _dummy.matrix);
+      }
+      this.treeTrunkInst.instanceMatrix.needsUpdate = true;
+      this.treeBlossomInst.instanceMatrix.needsUpdate = true;
+
+      // Skyline tech towers (slight parallax)
+      for (let i = 0; i < this.techTowerItems.length; i++) {
+        const b = this.techTowerItems[i];
+        b.z += forwardStep * 0.84;
+        if (b.z > 26) b.z -= 228;
+        _dummy.position.set(b.x, b.y, b.z);
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.scale.set(b.scaleX, b.scaleY, b.scaleZ);
+        _dummy.updateMatrix();
+        this.techTowerInst.setMatrixAt(i, _dummy.matrix);
+      }
+      this.techTowerInst.instanceMatrix.needsUpdate = true;
+
+      // Warm Bengaluru shopfronts
+      for (let i = 0; i < this.shopfrontItems.length; i++) {
+        const s = this.shopfrontItems[i];
+        s.z += forwardStep * 0.96;
+        if (s.z > 26) s.z -= 220;
+        _dummy.position.set(s.x, s.y, s.z);
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.scale.set(s.scaleX, s.scaleY, s.scaleZ);
+        _dummy.updateMatrix();
+        this.shopfrontInst.setMatrixAt(i, _dummy.matrix);
+      }
+      this.shopfrontInst.instanceMatrix.needsUpdate = true;
+
+      // Cycling landmarks (slow majestic parallax)
+      this.vidhanaLandmark.position.z += forwardStep * 0.42;
+      if (this.vidhanaLandmark.position.z > 35) this.vidhanaLandmark.position.z = -185;
+      this.ubCityLandmark.position.z += forwardStep * 0.45;
+      if (this.ubCityLandmark.position.z > 35) this.ubCityLandmark.position.z = -195;
+
+      // Big funny roadside billboards + instanced backing frames & posts
+      for (let i = 0; i < this.cyclingBillboards.length; i++) {
+        const bb = this.cyclingBillboards[i];
+        bb.z += forwardStep;
+        if (bb.z > 22) bb.z -= 192;
+        bb.group.position.z = bb.z;
+
+        const rotY = bb.side * -0.24;
+        _dummy.position.set(bb.side * 10.6, 5.2, bb.z);
+        _dummy.rotation.set(0, rotY, 0);
+        _dummy.scale.set(1, 1, 1);
+        _dummy.updateMatrix();
+        this.billboardBackInst.setMatrixAt(i, _dummy.matrix);
+
+        _dummy.position.set(bb.side * 10.6, 1.4, bb.z);
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.updateMatrix();
+        this.billboardPostInst.setMatrixAt(i, _dummy.matrix);
+      }
+      this.billboardBackInst.instanceMatrix.needsUpdate = true;
+      this.billboardPostInst.instanceMatrix.needsUpdate = true;
+
+      // Clouds
+      for (let i = 0; i < this.cloudItems.length; i++) {
+        const c = this.cloudItems[i];
+        c.z += forwardStep * 0.25 + 0.015;
+        if (c.z > 32) c.z -= 252;
+        _dummy.position.set(c.x, c.y, c.z);
+        _dummy.rotation.set(0, c.rotY, 0);
+        _dummy.scale.set(c.scaleX, c.scaleY, c.scaleZ);
+        _dummy.updateMatrix();
+        this.cloudInst.setMatrixAt(i, _dummy.matrix);
+      }
+      this.cloudInst.instanceMatrix.needsUpdate = true;
+    }
+
+    if (this.undergroundGroup.visible) {
+      for (let i = 0; i < this.tunnelRibZ.length; i++) {
+        this.tunnelRibZ[i] += forwardStep;
+        if (this.tunnelRibZ[i] > 24) this.tunnelRibZ[i] -= 216;
+        const rz = this.tunnelRibZ[i];
+        _dummy.position.set(0, 8.85, rz);
+        _dummy.rotation.set(0, 0, 0);
+        _dummy.scale.set(1, 1, 1);
+        _dummy.updateMatrix();
+        this.tunnelRibInst.setMatrixAt(i, _dummy.matrix);
+
+        _dummy.position.set(0, 8.65, rz - 4);
+        _dummy.updateMatrix();
+        this.tunnelLightInst.setMatrixAt(i, _dummy.matrix);
+
+        _dummy.position.set(-6.05, 4.4, rz);
+        _dummy.updateMatrix();
+        this.tunnelNeonInst.setMatrixAt(i * 2, _dummy.matrix);
+
+        _dummy.position.set(6.05, 4.4, rz);
+        _dummy.updateMatrix();
+        this.tunnelNeonInst.setMatrixAt(i * 2 + 1, _dummy.matrix);
+      }
+      this.tunnelRibInst.instanceMatrix.needsUpdate = true;
+      this.tunnelLightInst.instanceMatrix.needsUpdate = true;
+      this.tunnelNeonInst.instanceMatrix.needsUpdate = true;
     }
   }
 
-  private buildCloudPool(): void {
-    const cloudMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.95,
-      emissive: 0xe0f2fe,
-      emissiveIntensity: 0.25,
-    });
-    for (let i = 0; i < 8; i++) {
-      const cloud = new THREE.Group();
-      const c1 = new THREE.Mesh(new THREE.SphereGeometry(2.8, 10, 8), cloudMat);
-      const c2 = new THREE.Mesh(new THREE.SphereGeometry(2.1, 10, 8), cloudMat);
-      c2.position.set(-2.4, -0.3, 0.3);
-      const c3 = new THREE.Mesh(new THREE.SphereGeometry(2.0, 10, 8), cloudMat);
-      c3.position.set(2.3, -0.4, -0.2);
-      cloud.add(c1, c2, c3);
-      cloud.position.set((i % 2 === 0 ? -1 : 1) * (14 + (i * 7) % 26), 22 + (i % 3) * 4.5, -20 - i * 20);
-      this.scene.add(cloud);
-      this.clouds.push(cloud);
-    }
+  private getActiveBoardPerk(): HoverboardPerk | null {
+    if (this.hoverboardTimer <= 0) return null;
+    const spec = HOVERBOARDS.find((h) => h.id === this.currentBoardId);
+    return spec?.perk ?? null;
+  }
+
+  private getActiveBoardGlowColor(): number {
+    const spec = HOVERBOARDS.find((h) => h.id === this.currentBoardId);
+    return spec?.glowColor ?? 0x00f5d4;
   }
 
   public updateProfile(profile: PlayerProfile): void {
+    const charChanged = profile.selectedCharacter !== this.currentCharId;
+    const boardChanged = profile.selectedHoverboard !== this.currentBoardId;
+    const qualityChanged = profile.quality !== this.currentQuality;
     this.profile = profile;
-    this.sound.setMuted(profile.soundMuted);
-    this.sound.setAnnouncerEnabled(profile.announcerEnabled);
-    this.applyQuality(profile.quality);
 
-    if (
-      profile.selectedCharacter !== this.currentCharId ||
-      profile.selectedHoverboard !== this.currentBoardId
-    ) {
-      const prevPos = this.runnerRig.root.position.clone();
-      const prevScale = this.runnerRig.root.scale.clone();
-      const hoverVis = this.runnerRig.hoverboardMount.visible;
-      const droneVis = this.runnerRig.droneMount.visible;
-
-      this.scene.remove(this.runnerRig.root);
-      disposeObject3D(this.runnerRig.root);
-
+    if (charChanged || boardChanged) {
       this.currentCharId = profile.selectedCharacter;
       this.currentBoardId = profile.selectedHoverboard;
-      this.runnerRig = buildRunnerRig(this.currentCharId, this.currentBoardId, this.textures);
-      this.runnerRig.root.position.copy(prevPos);
-      this.runnerRig.root.scale.copy(prevScale);
-      this.runnerRig.hoverboardMount.visible = hoverVis;
-      this.runnerRig.droneMount.visible = droneVis;
+      this.scene.remove(this.runnerRig.root);
+      disposeObject3D(this.runnerRig.root);
+      this.runnerRig = buildRunnerRig(this.currentCharId, this.currentBoardId, this.assets);
       this.scene.add(this.runnerRig.root);
+      this.runnerRig.hoverboardMount.visible = this.hoverboardTimer > 0;
+      this.runnerRig.droneMount.visible = this.droneTimer > 0;
+      if (this.mode === 'title') {
+        this.positionLobbyActors();
+      }
     }
-    this.pushHud(true);
-  }
 
-  private applyQuality(quality: GraphicsQuality): void {
-    if (this.isSoftwareGl) {
-      this.renderer.setPixelRatio(1);
-      this.renderer.shadowMap.enabled = false;
-    } else {
-      const dpr = quality === 'high' ? Math.min(window.devicePixelRatio || 1, 2) : 1;
-      this.renderer.setPixelRatio(dpr);
-      this.renderer.shadowMap.enabled = quality === 'high';
-      this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    if (qualityChanged) {
+      this.adaptiveQualityStep = 0;
+      this.applyQualitySettings(profile.quality);
     }
-    if (this.sunLight) {
-      this.sunLight.castShadow = !this.isSoftwareGl && quality === 'high';
-    }
+    this.emitHud();
   }
 
   public triggerLobbyWave(): void {
-    if (this.mode !== 'title') return;
-    this.lobbyHopTimer = 0.55;
-    this.sound.playJump();
+    if (this.mode === 'title') {
+      this.lobbyWaveTimer = 1.15;
+    }
+  }
+
+  private positionLobbyActors(): void {
+    this.runnerRig.root.position.set(0, 0, 0);
+    this.runnerRig.root.rotation.set(0, Math.PI, 0); // Facing the lobby camera!
+    this.runnerRig.root.scale.set(1, 1, 1);
+    this.runnerRig.hoverboardMount.visible = false;
+    this.runnerRig.droneMount.visible = false;
+    this.runnerRig.sneakersLeft.visible = false;
+    this.runnerRig.sneakersRight.visible = false;
+
+    // Inspector & Bengaluru street dog patrolling visibly to the right of the runner!
+    this.chaserRig.root.visible = true;
+    this.chaserRig.root.position.set(2.4, 0, -2.5);
+    this.chaserRig.root.rotation.set(0, Math.PI - 0.35, 0);
+
+    this.lobbyTrainMesh.visible = true;
+    this.lobbyTrainMesh.position.set(LANE_POSITIONS[0], 0, -13.5);
+  }
+
+  private clearActiveRunEntities(): void {
+    for (let i = 0; i < this.hazards.length; i++) {
+      const h = this.hazards[i];
+      if (h.trainSlot) this.pools.releaseTrain(h.trainSlot);
+      if (h.obstacleSlot) this.pools.releaseObstacle(h.obstacleSlot);
+    }
+    this.hazards.length = 0;
+    this.pools.resetAll();
   }
 
   public startRun(): void {
-    this.clearDynamicEntities();
+    this.clearActiveRunEntities();
+    this.lobbyTrainMesh.visible = false;
+
     this.mode = 'playing';
     this.player = createInitialPlayerKinematics();
     this.score = 0;
@@ -847,593 +1103,689 @@ export class MetroRunnerEngine implements RunnerEngine {
     this.stationsPassed = 0;
     this.kaapiUsed = 0;
     this.closeCalls = 0;
+    this.mysteryBoxesCollected = 0;
+    this.mysteryBonusTokens = 0;
+    this.lastMysteryRewardLabel = '';
     this.lastStationName = 'Indiranagar';
     this.runSummary = null;
-    this.crashPending = false;
-    this.crashDelayTimer = 0;
-    this.hitstopTimer = 0;
-    this.cameraTrauma = 0;
+    this.runTime = 0;
 
     this.zone = 'elevated';
     this.spawnedZone = 'elevated';
     this.weather = this.weatherOverride ?? 'sunny';
-    this.sound.setUnderground(false);
+    this.applyZoneVisuals('elevated');
+    this.applyWeatherPreset(this.weather);
+
     this.elevatedIdx = 0;
     this.undergroundIdx = 0;
-    this.nextStationDist = 210;
-    this.nextZoneDist = 720;
+    this.nextChunkZ = -68;
+    this.nextStationDistance = 175;
+    this.nextZoneSwitchDistance = 720;
+    this.lastChunkId = null;
+
+    // Inviting Subway Surfers warm-up coin runway across center lane so player settles in smoothly
+    for (let c = 0; c < 10; c++) {
+      this.pools.spawnToken(LANE_POSITIONS[1], 1.12, -16 - c * 3.8);
+    }
 
     this.kaapiTimer = 0;
     this.magnetTimer = 0;
     this.droneTimer = 0;
+    this.sneakersTimer = 0;
+    this.multiplierTimer = 0;
     this.hoverboardTimer = 0;
     this.hoverboardCooldown = 0;
-    this.chaserTimer = 4.2;
-    this.stumbleGraceTimer = 0;
+    this.headstartActive = false;
+    this.headstartTargetDist = 0;
+    this.invincibilityTimer = 0;
+    this.chaserTimer = 4.2; // Inspector & street dog chase visibly at run start!
+    this.chaserZ = 3.9;
+    this.prevChaserZ = 3.9;
+    this.shakeTime = 0;
+    this.shakeIntensity = 0;
+    this.crashTimer = 0;
+    this.lobbyTransition = 0; // Triggers silky 0.65s lobby-to-chase camera sweep!
+    this.currentStation = null;
     this.stationBannerTimer = 0;
-    this.activeStationBanner = null;
     this.callout = null;
     this.calloutTimer = 0;
-    this.activeVoiceOver = null;
+    this.voiceOver = null;
     this.voiceOverTimer = 0;
 
     this.runnerRig.root.position.set(0, 0, 0);
     this.runnerRig.root.rotation.set(0, 0, 0);
-    this.runnerRig.bodyGroup.rotation.set(0, 0, 0);
-    this.runnerRig.bodyGroup.scale.set(1, 1, 1);
     this.runnerRig.hoverboardMount.visible = false;
     this.runnerRig.droneMount.visible = false;
-
+    this.runnerRig.sneakersLeft.visible = false;
+    this.runnerRig.sneakersRight.visible = false;
     this.chaserRig.root.visible = true;
-    this.chaserRig.root.position.set(0, 0, 3.2);
-    this.lobbyTrain.visible = false;
+    this.chaserRig.root.rotation.set(0, 0, 0);
 
-    for (const r of this.tunnelRings) r.visible = false;
-    for (const c of this.sceneryChunks) c.visible = true;
+    // Pre-populate horizon with 2 clean handcrafted chunks (keeps draw calls strictly < 85!)
+    for (let i = 0; i < 2; i++) {
+      this.spawnNextChunk();
+    }
 
-    // Safe opening runway with welcoming golden tokens (survives initial seconds cleanly!)
-    this.spawnTokenLine(1, -18, 8, 1.05, 3.2);
-    this.nextWaveZ = -88;
-
+    this.sound.setUnderground(false);
     this.sound.startMusic();
-    this.triggerStationBanner(ELEVATED_STATIONS[0], false);
+    this.sound.playChaseStart();
     this.triggerVoiceOver('run_start');
-    this.pushHud(true);
+    this.emitHud();
   }
 
   public returnToTitle(): void {
-    this.clearDynamicEntities();
+    this.clearActiveRunEntities();
     this.mode = 'title';
+    this.zone = 'elevated';
+    this.weather = this.weatherOverride ?? 'sunny';
+    this.applyZoneVisuals('elevated');
+    this.applyWeatherPreset(this.weather);
+    this.player = createInitialPlayerKinematics();
+    this.lobbyTransition = 0;
     this.sound.stopMusic();
     this.sound.cancelSpeech();
-    this.activeVoiceOver = null;
+    this.voiceOver = null;
     this.voiceOverTimer = 0;
-    this.player = createInitialPlayerKinematics();
-    this.zone = 'elevated';
-    this.weather = 'sunny';
-    this.runnerRig.root.position.set(0, 0, 0);
-    this.runnerRig.bodyGroup.scale.set(1, 1, 1);
-    this.runnerRig.hoverboardMount.visible = false;
-    this.runnerRig.droneMount.visible = false;
-    this.chaserRig.root.visible = false;
-    this.lobbyTrain.visible = true;
-    this.lobbyTrain.position.set(-LANE_POSITIONS[2], 0, -42);
-    this.weatherMesh.visible = false;
-
-    for (const r of this.tunnelRings) r.visible = false;
-    for (const c of this.sceneryChunks) c.visible = true;
-    this.pushHud(true);
+    this.callout = null;
+    this.calloutTimer = 0;
+    this.positionLobbyActors();
+    this.emitHud();
   }
 
   public pause(): void {
     if (this.mode !== 'playing') return;
     this.mode = 'paused';
     this.sound.stopMusic();
-    this.pushHud(true);
+    this.emitHud();
   }
 
   public resume(): void {
     if (this.mode !== 'paused') return;
     this.mode = 'playing';
-    this.lastTs = performance.now();
+    this.lastFrameMs = performance.now();
+    this.accumulator = 0;
     this.sound.startMusic();
-    this.pushHud(true);
+    this.emitHud();
   }
 
   public queueAction(action: RunnerAction): void {
-    if (this.mode !== 'playing' || this.crashPending) return;
+    if (this.mode !== 'playing') return;
     queuePlayerAction(this.player, action);
   }
 
   public activateHoverboard(): void {
-    if (this.mode !== 'playing' || this.crashPending) return;
-    if (this.hoverboardTimer > 0 || this.hoverboardCooldown > 0) return;
+    if (this.mode !== 'playing') return;
+    if (this.hoverboardTimer > 0 || this.hoverboardCooldown > 0 || this.droneTimer > 0) return;
 
     this.hoverboardDuration = getPowerUpDuration(this.profile, 'hoverboard');
     this.hoverboardTimer = this.hoverboardDuration;
     this.runnerRig.hoverboardMount.visible = true;
-    this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.25);
+    this.player.activeBoardPerk = this.getActiveBoardPerk();
     this.sound.playAutoHorn();
-    this.spawnBurst(this.player.x, this.player.y + 0.4, 0, 0xffd60a, 16);
-    this.showCallout('AUTO BOARD ON! PEE-PEE!', '#FFD60A');
+    this.pools.spawnBurst(this.player.x, this.player.y + 0.5, 0, this.getActiveBoardGlowColor(), 14, 6.5);
+    this.showCallout('HOVERBOARD ON!', '#00f5d4');
     this.triggerVoiceOver('hoverboard');
-    this.pushHud(true);
+    this.emitHud();
+  }
+
+  public activateHeadstart(): void {
+    if (this.mode !== 'playing') return;
+    if (this.headstartActive || this.runTime > HEADSTART_WINDOW) return;
+
+    this.headstartActive = true;
+    this.headstartTargetDist = this.distance + HEADSTART_DISTANCE;
+    this.invincibilityTimer = Math.max(this.invincibilityTimer, 5.2);
+    this.chaserTimer = 0;
+    this.sound.playHeadstart();
+    this.pools.triggerShockwave(this.player.x, this.player.y + 0.4, 0xffd60a);
+    this.pools.spawnBurst(this.player.x, this.player.y + 1.1, 0, 0xffd60a, 18, 8.5);
+    this.showCallout('NAMMA EXPRESS HEADSTART!', '#ffd60a');
+    this.triggerVoiceOver('kaapi');
+    this.emitHud();
   }
 
   private showCallout(text: string, color: string): void {
     this.callout = { id: this.calloutSeq++, text, color };
-    this.calloutTimer = 1.2;
-    this.pushHud(true);
+    this.calloutTimer = 1.65;
   }
 
   private triggerVoiceOver(event: VoiceOverEvent): void {
-    const phrase = pickVoiceOverPhrase(event, this.lastVoiceOverByEvent[event]);
-    this.lastVoiceOverByEvent[event] = phrase.id;
-    this.activeVoiceOver = { id: this.voiceOverSeq++, phrase };
-    this.voiceOverTimer = 3.2;
+    const phrase = pickVoiceOverPhrase(event, this.lastVoicePhraseIds[event]);
+    this.lastVoicePhraseIds[event] = phrase.id;
+    this.voiceOver = { id: this.voiceOverSeq++, phrase };
+    this.voiceOverTimer = 2.6;
     this.sound.playVoiceOver(phrase);
-    this.pushHud(true);
   }
 
-  private triggerStationBanner(station: MetroStation, announce: boolean): void {
-    this.activeStationBanner = station;
-    this.stationBannerTimer = 4.0;
-    this.lastStationName = station.nameEn;
-    if (announce) this.sound.playStationChime(station.nameEn);
-    this.pushHud(true);
-  }
+  private applyZoneVisuals(zone: ZoneMode): void {
+    this.zone = zone;
+    const isUnderground = zone === 'underground';
+    this.elevatedGroup.visible = !isUnderground;
+    this.undergroundGroup.visible = isUnderground;
+    this.skyDome.mesh.visible = !isUnderground;
+    this.sound.setUnderground(isUnderground);
 
-  private clearDynamicEntities(): void {
-    for (const h of this.hazards) {
-      this.scene.remove(h.mesh);
-      disposeObject3D(h.mesh);
-    }
-    for (const t of this.tokens) {
-      this.scene.remove(t.mesh);
-      disposeObject3D(t.mesh);
-    }
-    for (const p of this.powerUps) {
-      this.scene.remove(p.mesh);
-      disposeObject3D(p.mesh);
-    }
-    for (const s of this.stations) {
-      this.scene.remove(s.mesh);
-      disposeObject3D(s.mesh);
-    }
-    for (const pt of this.portals) {
-      this.scene.remove(pt.mesh);
-      disposeObject3D(pt.mesh);
-    }
-    this.hazards = [];
-    this.tokens = [];
-    this.powerUps = [];
-    this.stations = [];
-    this.portals = [];
-  }
-
-  private spawnBurst(x: number, y: number, z: number, hexColor: number, count: number): void {
-    for (let i = 0; i < count; i++) {
-      const slot = this.particles[this.particleCursor];
-      this.particleCursor = (this.particleCursor + 1) % this.particles.length;
-      slot.active = true;
-      slot.x = x + (Math.random() - 0.5) * 0.6;
-      slot.y = y + (Math.random() - 0.5) * 0.5;
-      slot.z = z + (Math.random() - 0.5) * 0.6;
-      const angle = Math.random() * Math.PI * 2;
-      const spd = 2.5 + Math.random() * 6.2;
-      slot.vx = Math.cos(angle) * spd;
-      slot.vy = 2.6 + Math.random() * 6.0;
-      slot.vz = Math.sin(angle) * spd;
-      slot.maxLife = 0.35 + Math.random() * 0.32;
-      slot.life = slot.maxLife;
-      slot.scale = 0.7 + Math.random() * 0.85;
-      slot.color.setHex(hexColor);
+    if (isUnderground) {
+      this.fog.color.setHex(0x161228);
+      this.fog.near = 28;
+      this.fog.far = 128;
+      this.hemiLight.color.setHex(0xb8c0ff);
+      this.hemiLight.groundColor.setHex(0x231942);
+      this.hemiLight.intensity = 1.2;
+      this.sunLight.color.setHex(0x93c5fd);
+      this.sunLight.intensity = 1.35;
+      this.assets.setTrackWetness(0.15);
+    } else {
+      this.updateSkyAndLightingForWeather(1);
     }
   }
 
-  private spawnTokenLine(
-    lane: number,
-    startZ: number,
-    count: number,
-    yBase: number,
-    spacing: number,
-    archHeight = 0,
-  ): void {
-    const x = LANE_POSITIONS[lane];
-    for (let i = 0; i < count; i++) {
-      const t = count > 1 ? i / (count - 1) : 0.5;
-      const arch = archHeight > 0 ? Math.sin(t * Math.PI) * archHeight : 0;
-      const mesh = buildTokenMesh();
-      const z = startZ - i * spacing;
-      const y = yBase + arch;
-      mesh.position.set(x, y, z);
-      this.scene.add(mesh);
-      this.tokens.push({ mesh, x, y, z, collected: false });
+  private applyWeatherPreset(weather: WeatherMode): void {
+    this.weather = weather;
+    this.weatherBlend = weather === 'sunny' ? 0 : weather === 'light_rain' ? 0.5 : 1.0;
+    this.rainIntensity = weather === 'sunny' ? 0 : weather === 'light_rain' ? 0.42 : 1.0;
+    if (this.zone === 'elevated') {
+      this.updateSkyAndLightingForWeather(1);
     }
   }
 
-  private spawnPowerUp(type: PowerUpType, lane: number, z: number, y = 1.35): void {
-    const mesh = buildPowerUpMesh(type);
-    mesh.position.set(LANE_POSITIONS[lane], y, z);
-    this.scene.add(mesh);
-    this.powerUps.push({ mesh, type, lane, y, z, collected: false });
+  private updateSkyAndLightingForWeather(lerpFactor: number): void {
+    if (this.zone === 'underground') return;
+
+    const targetBlend = this.weather === 'sunny' ? 0 : this.weather === 'light_rain' ? 0.5 : 1.0;
+    this.weatherBlend += (targetBlend - this.weatherBlend) * lerpFactor;
+
+    const targetRain = this.weather === 'sunny' ? 0 : this.weather === 'light_rain' ? 0.42 : 1.0;
+    this.rainIntensity += (targetRain - this.rainIntensity) * lerpFactor;
+
+    // Smooth Bengaluru sky dome + sunlight transition between Golden Sunny -> Light Rain -> Heavy Monsoon
+    const t = this.weatherBlend;
+    // Top zenith: vibrant sky blue -> rich moody monsoon slate
+    _colorA.setHex(0x1d7ed6).lerp(_colorB.setHex(0x334866), t);
+    this.skyDome.uniforms.uTopColor.value.copy(_colorA);
+    // Mid sky: crisp cyan -> atmospheric storm blue-gray
+    _colorA.setHex(0x4fc3f7).lerp(_colorB.setHex(0x526b8a), t);
+    this.skyDome.uniforms.uMidColor.value.copy(_colorA);
+    // Horizon: warm golden turquoise -> silver rain mist
+    _colorA.setHex(0xc8f0ff).lerp(_colorB.setHex(0x889cb3), t);
+    this.skyDome.uniforms.uHorizonColor.value.copy(_colorA);
+    // Sun glow: radiant Bengaluru sun -> soft diffused storm glow
+    _colorA.setHex(0xfff4b8).lerp(_colorB.setHex(0xcbd5e1), t);
+    this.skyDome.uniforms.uSunColor.value.copy(_colorA);
+    this.skyDome.uniforms.uSunIntensity.value = 1.0 - t * 0.72;
+
+    _colorA.setHex(0x8fd6f6).lerp(_colorB.setHex(0x6d829c), t);
+    this.fog.color.copy(_colorA);
+    this.fog.near = 64 - t * 20;
+    this.fog.far = 218 - t * 55;
+
+    this.hemiLight.intensity = 1.35 - t * 0.28;
+    this.sunLight.intensity = 2.25 - t * 0.95;
+    _colorC.setHex(0xfff4d6).lerp(_colorB.setHex(0xcbd5e1), t);
+    this.sunLight.color.copy(_colorC);
+
+    // Wet reflective puddles & sheen on track & train roofs during rain/monsoon!
+    this.assets.setTrackWetness(t * 0.92);
+  }
+
+  private pickWeightedPowerUp(pool?: PowerUpType[]): PowerUpType {
+    if (pool && pool.length > 0) {
+      return pool[Math.floor(Math.random() * pool.length)];
+    }
+    const r = Math.random();
+    if (r < 0.2) return 'magnet';
+    if (r < 0.38) return 'sneakers';
+    if (r < 0.56) return 'multiplier';
+    if (r < 0.74) return 'kaapi';
+    if (r < 0.89) return 'drone';
+    return 'mystery_box';
   }
 
   /**
-   * Prevents overlapping trains in the same lane AND prevents faster moving trains
-   * from overtaking and clipping straight through static trains or barriers ahead!
+   * Spawns the next handcrafted, guaranteed-solvable level chunk strictly from
+   * pre-allocated zero-GC object pools. Zero `new THREE.*` allocations!
    */
-  private canSpawnInLane(lane: number, zStart: number, zEnd: number, isMoving: boolean): boolean {
-    const pad = 16;
-    for (let i = 0; i < this.hazards.length; i++) {
-      const other = this.hazards[i];
-      if (other.lane !== lane) continue;
+  private spawnNextChunk(): void {
+    const chunk: LevelChunk = selectNextChunk(this.distance, this.lastChunkId);
+    this.lastChunkId = chunk.id;
+    const anchorZ = this.nextChunkZ;
 
-      // Direct Z-interval overlap with safety margin
-      if (zStart + pad >= other.zEnd && zEnd - pad <= other.zStart) {
-        return false;
-      }
+    // 1. Spawn chunk hazards from pre-warmed train & obstacle pools
+    for (let i = 0; i < chunk.hazards.length; i++) {
+      const def = chunk.hazards[i];
+      const zCenter = anchorZ - def.zOffset;
+      const laneX = LANE_POSITIONS[def.lane];
+      const line: 'purple' | 'green' = def.line ?? (Math.random() < 0.65 ? 'purple' : 'green');
 
-      // If we are spawning a fast moving train behind a slower hazard in the same lane,
-      // it would overtake and pass through it before reaching the player!
-      if (isMoving && other.speedOffset === 0 && other.zEnd > zStart - 110) {
-        return false;
-      }
-
-      // Conversely, don't spawn a static hazard in front of a moving train already rushing down this lane
-      if (!isMoving && other.speedOffset > 0 && other.zStart < zEnd + 110) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private spawnHazard(kind: HazardKind, lane: number, zCenter: number): boolean {
-    const line: 'purple' | 'green' = Math.random() < 0.62 ? 'purple' : 'green';
-    let length = 1.2;
-    let height = 1.35;
-    let speedOffset = 0;
-    let clearanceBottomY: number | undefined;
-    let rampLength: number | undefined;
-
-    if (kind === 'train_static' || kind === 'train_ramp' || kind === 'train_moving') {
-      length = kind === 'train_moving' ? 18 : 16;
-      height = TRAIN_ROOF_Y;
-      const hasRamp = kind === 'train_ramp';
-      rampLength = hasRamp ? 5.4 : undefined;
-      speedOffset = kind === 'train_moving' ? 11.5 : 0;
-    } else {
-      length = 0.8;
-      if (kind === 'gantry_low') {
-        height = 3.2;
-        clearanceBottomY = 1.3;
-      }
-    }
-
-    const zStart = zCenter + length / 2 + (rampLength ?? 0);
-    const zEnd = zCenter - length / 2;
-
-    if (!this.canSpawnInLane(lane, zStart, zEnd, speedOffset > 0)) {
-      return false;
-    }
-
-    const id = this.nextEntityId++;
-    const mesh =
-      kind === 'train_static' || kind === 'train_ramp' || kind === 'train_moving'
-        ? buildTrainMesh(line, length, kind === 'train_ramp', this.textures)
-        : buildObstacleMesh(kind, this.textures);
-
-    mesh.position.set(LANE_POSITIONS[lane], 0, zCenter);
-    this.scene.add(mesh);
-
-    this.hazards.push({
-      id,
-      kind,
-      lane,
-      zStart,
-      zEnd,
-      prevZStart: zStart,
-      prevZEnd: zEnd,
-      height,
-      clearanceBottomY,
-      rampLength,
-      mesh,
-      speedOffset,
-      active: true,
-    });
-    return true;
-  }
-
-  private spawnNextWave(): void {
-    const z = this.nextWaveZ;
-    const lanes = [0, 1, 2];
-    const openLane = lanes[Math.floor(Math.random() * 3)];
-    const otherLanes = lanes.filter((l) => l !== openLane);
-
-    const roll = Math.random();
-    if (roll < 0.36) {
-      const rampLane = otherLanes[0];
-      if (this.spawnHazard('train_ramp', rampLane, z - 12)) {
-        this.spawnTokenLine(rampLane, z - 2, 6, TRAIN_ROOF_Y + 0.9, 3.0);
-      }
-      if (Math.random() < 0.6) {
-        if (this.spawnHazard('train_static', otherLanes[1], z - 24)) {
-          this.spawnTokenLine(otherLanes[1], z - 16, 4, TRAIN_ROOF_Y + 0.9, 3.0);
-        }
+      if (def.kind === 'train_static' || def.kind === 'train_ramp' || def.kind === 'train_moving') {
+        const slot = this.pools.acquireTrain(def.kind as TrainPoolKind, line);
+        if (!slot) continue;
+        const length = def.kind === 'train_moving' ? 18 : 16;
+        const rampLength = def.kind === 'train_ramp' ? 5.4 : undefined;
+        slot.mesh.position.set(laneX, 0, zCenter);
+        this.hazards.push({
+          id: this.nextHazardId++,
+          kind: def.kind,
+          lane: def.lane,
+          zCenter,
+          prevZCenter: zCenter,
+          zStart: zCenter + length / 2 + (rampLength ?? 0),
+          zEnd: zCenter - length / 2,
+          prevZStart: zCenter + length / 2 + (rampLength ?? 0),
+          prevZEnd: zCenter - length / 2,
+          height: TRAIN_ROOF_Y,
+          rampLength,
+          trainSlot: slot,
+          obstacleSlot: null,
+          speedOffset: def.kind === 'train_moving' ? 14 + Math.min(10, this.distance * 0.008) : 0,
+          active: true,
+          length,
+        });
       } else {
-        this.spawnHazard('barricade_bbmp', openLane, z - 8);
-        this.spawnTokenLine(openLane, z - 4, 5, 1.1, 2.4, 2.0);
+        const slot = this.pools.acquireObstacle(def.kind as ObstacleKind);
+        if (!slot) continue;
+        slot.mesh.position.set(laneX, 0, zCenter);
+        const halfDepth = def.kind === 'pillar_narrow' ? 0.52 : 0.42;
+        const height =
+          def.kind === 'pillar_narrow' ? 4.6 : def.kind === 'gantry_low' ? 2.85 : 1.38;
+        this.hazards.push({
+          id: this.nextHazardId++,
+          kind: def.kind,
+          lane: def.lane,
+          zCenter,
+          prevZCenter: zCenter,
+          zStart: zCenter + halfDepth,
+          zEnd: zCenter - halfDepth,
+          prevZStart: zCenter + halfDepth,
+          prevZEnd: zCenter - halfDepth,
+          height,
+          clearanceBottomY: def.kind === 'gantry_low' ? 1.32 : undefined,
+          trainSlot: null,
+          obstacleSlot: slot,
+          speedOffset: 0,
+          active: true,
+          length: halfDepth * 2,
+        });
       }
-    } else if (roll < 0.68) {
-      if (!this.spawnHazard('train_moving', otherLanes[0], z - 26)) {
-        // Fallback to clean static train if lane has a slower train ahead
-        this.spawnHazard('train_static', otherLanes[0], z - 20);
+    }
+
+    // 2. Spawn coin sightlines (straight, parabolic jump arcs, diagonal lane switchbacks)
+    for (let i = 0; i < chunk.coinLines.length; i++) {
+      const lineDef = chunk.coinLines[i];
+      const startX = LANE_POSITIONS[lineDef.lane];
+      const endX =
+        lineDef.endLane !== undefined ? LANE_POSITIONS[lineDef.endLane] : startX;
+      for (let c = 0; c < lineDef.count; c++) {
+        const t = lineDef.count > 1 ? c / (lineDef.count - 1) : 0;
+        const x = startX + (endX - startX) * t;
+        const arch = lineDef.archHeight ? Math.sin(t * Math.PI) * lineDef.archHeight : 0;
+        const y = lineDef.yBase + arch;
+        const z = anchorZ - lineDef.zOffset - c * lineDef.spacing;
+        this.pools.spawnToken(x, y, z);
       }
-      this.spawnHazard('gantry_low', otherLanes[1], z - 6);
-      this.spawnTokenLine(openLane, z - 2, 6, 1.1, 2.8);
-    } else {
-      this.spawnHazard('barricade_bbmp', otherLanes[0], z - 4);
-      this.spawnHazard('barrier_jump', otherLanes[1], z - 12);
-      this.spawnTokenLine(otherLanes[0], z - 1, 5, 1.15, 2.1, 2.1);
-      this.spawnTokenLine(openLane, z - 6, 5, 1.1, 2.8);
     }
 
-    if (Math.random() < 0.24) {
-      const types: PowerUpType[] = ['kaapi', 'magnet', 'drone'];
-      this.spawnPowerUp(types[Math.floor(Math.random() * types.length)], openLane, z - 18);
+    // 3. Spawn optional power-up anchors
+    if (chunk.powerUps) {
+      for (let i = 0; i < chunk.powerUps.length; i++) {
+        const p = chunk.powerUps[i];
+        if (Math.random() <= p.chance) {
+          const type = this.pickWeightedPowerUp(p.pool);
+          const z = anchorZ - p.zOffset;
+          const slot = this.pools.acquirePowerUp(type, p.lane, p.y, z);
+          if (slot) {
+            slot.rig.root.position.set(LANE_POSITIONS[p.lane], p.y, z);
+          }
+        }
+      }
     }
 
-    if (this.droneTimer > 0) {
-      this.spawnTokenLine(Math.floor(Math.random() * 3), z - 2, 7, DRONE_FLIGHT_Y + 0.8, 3.0, 0.8);
+    // 4. Spawn Drone Sky Coin Ribbons when Bengaluru Tech Drone is flying!
+    if (this.droneTimer > 1.2) {
+      const skyLane = Math.floor(Math.random() * 3);
+      for (let c = 0; c < 10; c++) {
+        this.pools.spawnToken(
+          LANE_POSITIONS[skyLane],
+          DRONE_FLIGHT_Y + 0.35 + Math.sin(c * 0.55) * 0.3,
+          anchorZ - 4 - c * 3.4,
+        );
+      }
     }
 
-    this.nextWaveZ -= Math.max(28, 36 - this.distance * 0.004);
+    // 5. Station & Underground Tunnel Portal pacing
+    const predictedDist = this.distance + Math.abs(anchorZ);
+    if (predictedDist >= this.nextStationDistance) {
+      const list = this.spawnedZone === 'elevated' ? ELEVATED_STATIONS : UNDERGROUND_STATIONS;
+      const idx = this.spawnedZone === 'elevated' ? this.elevatedIdx++ : this.undergroundIdx++;
+      const station = list[idx % list.length];
+      this.pools.acquireStation(station, anchorZ - chunk.length * 0.5);
+      this.nextStationDistance = predictedDist + 210;
+    }
+
+    if (predictedDist >= this.nextZoneSwitchDistance) {
+      const targetZone: ZoneMode = this.spawnedZone === 'elevated' ? 'underground' : 'elevated';
+      this.pools.acquirePortal(targetZone, anchorZ - chunk.length + 6);
+      this.spawnedZone = targetZone;
+      this.nextZoneSwitchDistance = predictedDist + 720;
+    }
+
+    this.nextChunkZ = anchorZ - chunk.length;
   }
 
-  private spawnStationAhead(): void {
-    const pool = this.spawnedZone === 'underground' ? UNDERGROUND_STATIONS : ELEVATED_STATIONS;
-    const idx =
-      this.spawnedZone === 'underground'
-        ? this.undergroundIdx++ % pool.length
-        : this.elevatedIdx++ % pool.length;
-    const station = pool[idx];
-    const mesh = buildStationStructure(station, this.textures);
-    mesh.position.set(0, 0, -135);
-    this.scene.add(mesh);
-    this.stations.push({ mesh, station, z: -135, announced: false });
+  private clearHazardsInRadius(radiusZ: number): void {
+    for (let i = this.hazards.length - 1; i >= 0; i--) {
+      const h = this.hazards[i];
+      if (h.zStart >= -radiusZ && h.zEnd <= 10) {
+        this.pools.spawnBurst(LANE_POSITIONS[h.lane], 1.6, Math.max(-22, h.zCenter), 0x00f5d4, 8, 7.5);
+        if (h.trainSlot) this.pools.releaseTrain(h.trainSlot);
+        if (h.obstacleSlot) this.pools.releaseObstacle(h.obstacleSlot);
+        this.hazards.splice(i, 1);
+      }
+    }
   }
 
-  private spawnPortalAhead(targetZone: ZoneMode): void {
-    const mesh = buildTunnelPortal(this.textures);
-    mesh.position.set(0, 0, -135);
-    this.scene.add(mesh);
-    this.portals.push({ mesh, z: -135, targetZone, passed: false });
+  private collectPowerUp(type: PowerUpType): void {
+    this.sound.playPowerUp();
+    if (type === 'kaapi') {
+      this.kaapiDuration = getPowerUpDuration(this.profile, 'kaapi');
+      this.kaapiTimer = this.kaapiDuration;
+      this.kaapiUsed++;
+      this.invincibilityTimer = Math.max(this.invincibilityTimer, 0.8);
+      const quip = SPEED_BOOST_QUIPS[Math.floor(Math.random() * SPEED_BOOST_QUIPS.length)];
+      this.showCallout(quip, '#f59e0b');
+      this.triggerVoiceOver('kaapi');
+    } else if (type === 'magnet') {
+      this.magnetDuration = getPowerUpDuration(this.profile, 'magnet');
+      this.magnetTimer = this.magnetDuration;
+      this.showCallout('UPI COIN MAGNET!', '#ef4444');
+      this.triggerVoiceOver('magnet');
+    } else if (type === 'drone') {
+      this.droneDuration = getPowerUpDuration(this.profile, 'drone');
+      this.droneTimer = this.droneDuration;
+      this.player.droneActive = true;
+      this.runnerRig.droneMount.visible = true;
+      this.invincibilityTimer = Math.max(this.invincibilityTimer, this.droneDuration + 1.0);
+      this.showCallout('BENGALURU TECH DRONE!', '#00f5d4');
+      this.triggerVoiceOver('drone');
+      // Spawn immediate aerial coin stream ahead across lanes!
+      const lane = this.player.lane;
+      for (let i = 0; i < 12; i++) {
+        this.pools.spawnToken(
+          LANE_POSITIONS[(lane + Math.floor(i / 4)) % 3],
+          DRONE_FLIGHT_Y + 0.3,
+          -14 - i * 3.6,
+        );
+      }
+    } else if (type === 'sneakers') {
+      this.sneakersDuration = getPowerUpDuration(this.profile, 'sneakers');
+      this.sneakersTimer = this.sneakersDuration;
+      this.player.sneakersActive = true;
+      this.runnerRig.sneakersLeft.visible = true;
+      this.runnerRig.sneakersRight.visible = true;
+      this.showCallout('SUPER SNEAKERS! JUMP ON TRAINS!', '#2dc653');
+      this.triggerVoiceOver('sneakers');
+    } else if (type === 'multiplier') {
+      this.multiplierDuration = getPowerUpDuration(this.profile, 'multiplier');
+      this.multiplierTimer = this.multiplierDuration;
+      this.showCallout('2X SCORE MULTIPLIER!', '#ffd60a');
+      this.triggerVoiceOver('multiplier');
+    } else if (type === 'mystery_box') {
+      this.sound.playMysteryBox();
+      this.mysteryBoxesCollected++;
+      const roll = Math.random();
+      if (roll < 0.5) {
+        const bonus = 60 + Math.floor(Math.random() * 5) * 15;
+        this.mysteryBonusTokens += bonus;
+        this.lastMysteryRewardLabel = `+${bonus} Bonus Metro Tokens!`;
+        this.showCallout(`MYSTERY BOX: +${bonus} TOKENS!`, '#c084fc');
+      } else if (roll < 0.8) {
+        this.hoverboardCooldown = 0;
+        this.mysteryBonusTokens += 35;
+        this.lastMysteryRewardLabel = 'Instant Hoverboard Charge + 35 Tokens!';
+        this.showCallout('MYSTERY BOX: BOARD CHARGED!', '#c084fc');
+      } else {
+        this.multiplierDuration = getPowerUpDuration(this.profile, 'multiplier');
+        this.multiplierTimer = Math.max(this.multiplierTimer, this.multiplierDuration);
+        this.mysteryBonusTokens += 40;
+        this.lastMysteryRewardLabel = '2x Multiplier Surge + 40 Tokens!';
+        this.showCallout('MYSTERY BOX: 2X SURGE + 40!', '#ffd60a');
+      }
+      this.triggerVoiceOver('mystery_box');
+    }
+    this.emitHud();
   }
 
-  private stepSimulation(rawDt: number): void {
-    const dt = Math.min(rawDt, 0.05);
-    this.elapsed += dt;
+  /**
+   * Fixed-timestep deterministic simulation step (`FIXED_DT = 1 / 120s`).
+   * Zero allocations, zero disposals.
+   */
+  private stepFixedSimulation(dt: number): void {
+    this.runTime += dt;
 
-    if (this.mode === 'title') {
-      this.stepLobby(dt);
-      return;
-    }
-    if (this.mode === 'paused' || this.mode === 'gameover') return;
-
-    if (this.hitstopTimer > 0) {
-      this.hitstopTimer -= dt;
-      this.updateParticles(dt);
-      this.updateCamera(dt, 0);
-      return;
-    }
-
-    if (this.crashPending) {
-      this.crashDelayTimer -= dt;
-      this.runnerRig.bodyGroup.rotation.x = THREE.MathUtils.damp(
-        this.runnerRig.bodyGroup.rotation.x,
-        -1.25,
-        10,
-        dt,
-      );
-      this.updateParticles(dt);
-      this.updateCamera(dt, 0);
-      if (this.crashDelayTimer <= 0) this.finalizeGameOver();
-      return;
-    }
-
+    // Power-up timers
     if (this.kaapiTimer > 0) {
       this.kaapiTimer = Math.max(0, this.kaapiTimer - dt);
-      if (Math.random() < 0.65) {
-        this.spawnBurst(this.player.x, this.player.y + 0.9, 0.5, 0xf59e0b, 1);
-      }
     }
-    if (this.magnetTimer > 0) this.magnetTimer = Math.max(0, this.magnetTimer - dt);
+    if (this.magnetTimer > 0) {
+      this.magnetTimer = Math.max(0, this.magnetTimer - dt);
+    }
     if (this.droneTimer > 0) {
       this.droneTimer = Math.max(0, this.droneTimer - dt);
-      this.player.droneActive = this.droneTimer > 0;
-      this.runnerRig.droneMount.visible = this.player.droneActive;
-      for (const r of this.runnerRig.droneRotors) r.rotation.y += dt * 36;
-    } else {
-      this.player.droneActive = false;
-      this.runnerRig.droneMount.visible = false;
+      if (this.droneTimer === 0) {
+        this.player.droneActive = false;
+        this.runnerRig.droneMount.visible = false;
+        this.invincibilityTimer = Math.max(this.invincibilityTimer, 1.15);
+        this.clearHazardsInRadius(22);
+      }
     }
-
+    if (this.sneakersTimer > 0) {
+      this.sneakersTimer = Math.max(0, this.sneakersTimer - dt);
+      if (this.sneakersTimer === 0) {
+        this.player.sneakersActive = false;
+        this.runnerRig.sneakersLeft.visible = false;
+        this.runnerRig.sneakersRight.visible = false;
+      }
+    }
+    if (this.multiplierTimer > 0) {
+      this.multiplierTimer = Math.max(0, this.multiplierTimer - dt);
+    }
     if (this.hoverboardTimer > 0) {
       this.hoverboardTimer = Math.max(0, this.hoverboardTimer - dt);
-      this.runnerRig.hoverboardMount.visible = true;
-      if (this.hoverboardTimer <= 0) {
+      if (this.hoverboardTimer === 0) {
         this.runnerRig.hoverboardMount.visible = false;
-        this.hoverboardCooldown = Math.max(
-          6,
-          HOVERBOARD_COOLDOWN - ((this.profile.upgrades.hoverboard ?? 1) - 1) * 1.4,
-        );
+        this.player.activeBoardPerk = null;
+        this.hoverboardCooldown = HOVERBOARD_COOLDOWN;
       }
     } else if (this.hoverboardCooldown > 0) {
       this.hoverboardCooldown = Math.max(0, this.hoverboardCooldown - dt);
     }
-
-    if (this.chaserTimer > 0) this.chaserTimer = Math.max(0, this.chaserTimer - dt);
-    if (this.stumbleGraceTimer > 0) this.stumbleGraceTimer = Math.max(0, this.stumbleGraceTimer - dt);
-    if (this.stationBannerTimer > 0) this.stationBannerTimer = Math.max(0, this.stationBannerTimer - dt);
-    if (this.calloutTimer > 0) {
-      this.calloutTimer = Math.max(0, this.calloutTimer - dt);
-      if (this.calloutTimer <= 0) this.callout = null;
+    if (this.invincibilityTimer > 0) {
+      this.invincibilityTimer = Math.max(0, this.invincibilityTimer - dt);
     }
-    if (this.voiceOverTimer > 0) {
-      this.voiceOverTimer = Math.max(0, this.voiceOverTimer - dt);
-      if (this.voiceOverTimer <= 0) this.activeVoiceOver = null;
+    if (this.chaserTimer > 0) {
+      this.chaserTimer = Math.max(0, this.chaserTimer - dt);
     }
-
-    const speed = getRunSpeed(this.distance, this.kaapiTimer > 0);
-    const dz = speed * dt;
-    this.distance += dz * 0.55;
-    const mult = getEffectiveMultiplier(this.profile);
-    this.score += dz * mult * (this.kaapiTimer > 0 ? 1.8 : 1.0);
-
-    if (this.distance >= this.nextZoneDist) {
-      this.spawnedZone = this.spawnedZone === 'elevated' ? 'underground' : 'elevated';
-      this.spawnPortalAhead(this.spawnedZone);
-      this.nextZoneDist += 720;
-    }
-    if (this.distance >= this.nextStationDist) {
-      this.spawnStationAhead();
-      this.nextStationDist += 280;
+    if (this.headstartActive && this.distance >= this.headstartTargetDist) {
+      this.headstartActive = false;
+      this.invincibilityTimer = Math.max(this.invincibilityTimer, 1.35);
+      this.clearHazardsInRadius(24);
+      this.emitHud();
     }
 
-    this.nextWaveZ += dz;
-    while (this.nextWaveZ > -145) this.spawnNextWave();
+    // Speed & Distance progression
+    const speed = getRunSpeed(this.distance, this.kaapiTimer > 0, this.headstartActive);
+    const forwardStep = speed * dt;
+    this.distance += forwardStep * 0.45;
+    const baseMult = getEffectiveMultiplier(this.profile);
+    const effectiveMult = this.multiplierTimer > 0 ? baseMult * 2 : baseMult;
+    this.score += forwardStep * 0.45 * effectiveMult * (this.kaapiTimer > 0 || this.headstartActive ? 1.5 : 1);
 
-    const trackTotal = 30 * this.trackSegments.length;
-    for (const seg of this.trackSegments) {
-      seg.position.z += dz;
-      if (seg.position.z > 32) seg.position.z -= trackTotal;
-    }
-
-    const showTunnel = this.zone === 'underground';
-    const ringTotal = 24 * this.tunnelRings.length;
-    for (const ring of this.tunnelRings) {
-      ring.visible = showTunnel;
-      ring.position.z += dz;
-      if (ring.position.z > 26) ring.position.z -= ringTotal;
-    }
-
-    const sceneryTotal = 36 * this.sceneryChunks.length;
-    for (const chunk of this.sceneryChunks) {
-      chunk.visible = !showTunnel;
-      chunk.position.z += dz * 0.85;
-      if (chunk.position.z > 38) chunk.position.z -= sceneryTotal;
-    }
-
-    for (const cloud of this.clouds) {
-      cloud.visible = !showTunnel;
-      cloud.position.z += dz * 0.14;
-      if (cloud.position.z > 24) cloud.position.z -= 180;
-    }
-
-    for (let i = this.portals.length - 1; i >= 0; i--) {
-      const pt = this.portals[i];
-      pt.z += dz;
-      pt.mesh.position.z = pt.z;
-      const pulse = Math.sin(this.elapsed * 12) > 0 ? 2.4 : 0.3;
-      pt.mesh.traverse((c) => {
-        if (c.name === 'portal_beacon' && c instanceof THREE.Mesh) {
-          (c.material as THREE.MeshStandardMaterial).emissiveIntensity = pulse;
+    // Dynamic weather cycling
+    const targetWeather = this.weatherOverride ?? getWeatherForDistance(this.distance, this.zone);
+    if (targetWeather !== this.weather) {
+      this.weather = targetWeather;
+      if (this.zone === 'elevated') {
+        if (targetWeather === 'heavy_monsoon') {
+          this.showCallout('HEAVY MONSOON! SLIPPERY TRACKS!', '#38bdf8');
+        } else if (targetWeather === 'light_rain') {
+          this.showCallout('BENGALURU DRIZZLE!', '#7dd3fc');
+        } else {
+          this.showCallout('CLEAR SKIES AHEAD!', '#ffd60a');
         }
-      });
-      if (!pt.passed && pt.z >= -1.5) {
-        pt.passed = true;
-        this.zone = pt.targetZone;
-        this.sound.setUnderground(this.zone === 'underground');
-        this.showCallout(
-          this.zone === 'underground' ? 'UNDERGROUND TUNNEL!' : 'ELEVATED VIADUCT!',
-          this.zone === 'underground' ? '#A855F7' : '#38BDF8',
-        );
       }
-      if (pt.z > 32) {
-        this.scene.remove(pt.mesh);
-        disposeObject3D(pt.mesh);
-        this.portals.splice(i, 1);
-      }
+      this.emitHud();
     }
 
-    for (let i = this.stations.length - 1; i >= 0; i--) {
-      const st = this.stations[i];
-      st.z += dz;
-      st.mesh.position.z = st.z;
-      if (!st.announced && st.z >= -32) {
-        st.announced = true;
-        this.stationsPassed++;
-        this.triggerStationBanner(st.station, true);
-      }
-      if (st.z > 42) {
-        this.scene.remove(st.mesh);
-        disposeObject3D(st.mesh);
-        this.stations.splice(i, 1);
-      }
-    }
-
-    const supports: SupportBox[] = [];
+    // Advance hazards & populate support boxes scratch array (zero allocation)
+    this.supportsScratch.length = 0;
     for (let i = this.hazards.length - 1; i >= 0; i--) {
       const h = this.hazards[i];
+      h.prevZCenter = h.zCenter;
       h.prevZStart = h.zStart;
       h.prevZEnd = h.zEnd;
-      const moveZ = dz + h.speedOffset * dt;
-      h.mesh.position.z += moveZ;
-      h.zStart += moveZ;
-      h.zEnd += moveZ;
 
-      if (h.kind === 'train_static' || h.kind === 'train_ramp' || h.kind === 'train_moving') {
-        supports.push({
+      const stepZ = forwardStep + h.speedOffset * dt;
+      h.zCenter += stepZ;
+      h.zStart += stepZ;
+      h.zEnd += stepZ;
+
+      if (h.zEnd > 18) {
+        if (h.trainSlot) this.pools.releaseTrain(h.trainSlot);
+        if (h.obstacleSlot) this.pools.releaseObstacle(h.obstacleSlot);
+        this.hazards.splice(i, 1);
+        continue;
+      }
+
+      if (h.kind.startsWith('train')) {
+        this.supportsScratch.push({
           lane: h.lane,
-          zStart: h.kind === 'train_ramp' && h.rampLength ? h.zStart - h.rampLength : h.zStart,
+          zStart: h.zStart - (h.rampLength ?? 0),
           zEnd: h.zEnd,
-          topY: h.height,
+          topY: TRAIN_ROOF_Y,
           isRamp: h.kind === 'train_ramp',
-          rampStartZ: h.zStart,
-          rampEndZ: h.rampLength ? h.zStart - h.rampLength : h.zStart,
+          rampStartZ: h.kind === 'train_ramp' ? h.zStart : undefined,
+          rampEndZ: h.kind === 'train_ramp' ? h.zStart - (h.rampLength ?? 5.4) : undefined,
         });
       }
-
-      if (h.zEnd > 24) {
-        this.scene.remove(h.mesh);
-        disposeObject3D(h.mesh);
-        this.hazards.splice(i, 1);
-      }
     }
 
-    const ev = stepPlayerPhysics(this.player, dt, supports, this.weather);
-    if (ev.switchedLane !== 0) {
-      this.sound.haptic(8);
-      this.sound.playWhoosh(ev.switchedLane > 0 ? 1.08 : 0.94);
-      if (this.weather === 'heavy_monsoon' && this.player.grounded) {
-        this.spawnBurst(this.player.x, this.player.y + 0.14, 0, 0x93c5fd, 8);
-      }
-    }
+    // Step player kinematics
+    this.player.activeBoardPerk = this.getActiveBoardPerk();
+    const ev = stepPlayerPhysics(this.player, dt, this.supportsScratch, this.weather);
     if (ev.jumped) {
-      this.sound.playJump();
-      this.spawnBurst(
-        this.player.x,
-        this.player.y + 0.1,
-        0,
-        this.weather === 'heavy_monsoon' ? 0xbae6fd : 0xffffff,
-        6,
-      );
+      const boosted = this.player.sneakersActive || this.player.activeBoardPerk === 'super_jump';
+      this.sound.playJump(boosted || ev.doubleJumped);
+      if (boosted || ev.doubleJumped) {
+        this.pools.spawnBurst(this.player.x, this.player.y + 0.15, 0, boosted ? 0x2dc653 : 0x00f5d4, 7, 4.2);
+      }
     }
-    if (ev.slammed || ev.rolled) this.sound.playRoll();
+    if (ev.slammed) {
+      this.sound.playFastFallThud();
+    } else if (ev.rolled) {
+      this.sound.playRoll();
+    }
     if (ev.landed) {
-      this.spawnBurst(
-        this.player.x,
-        this.player.y + 0.08,
-        0,
-        this.weather === 'heavy_monsoon' ? 0x93c5fd : 0xcbd5e1,
-        this.weather === 'heavy_monsoon' ? 9 : 5,
-      );
+      this.pools.spawnBurst(this.player.x, this.player.y + 0.08, 0, 0xe2e8f0, 5, 3.0);
+    }
+    if (ev.switchedLane !== 0) {
+      this.sound.playWhoosh(ev.switchedLane > 0 ? 1.08 : 0.92);
     }
 
-    const invincible = this.kaapiTimer > 0 || this.droneTimer > 0;
-    for (let i = this.hazards.length - 1; i >= 0; i--) {
+    // Advance & collect instanced tokens
+    this.pools.updateTokens(
+      dt,
+      forwardStep,
+      this.time,
+      this.player.x,
+      this.player.y,
+      this.magnetTimer > 0,
+      (tx, ty) => {
+        this.runTokens++;
+        this.score += 12 * effectiveMult;
+        this.sound.playToken();
+        this.pools.spawnBurst(tx, ty, 0, 0xffd60a, 5, 3.4);
+      },
+    );
+
+    // Advance & collect pooled power-ups
+    for (let i = 0; i < this.pools.powerUps.length; i++) {
+      const p = this.pools.powerUps[i];
+      if (!p.inUse) continue;
+      p.z += forwardStep;
+      if (p.z > 12) {
+        this.pools.releasePowerUp(p);
+        continue;
+      }
+      const px = LANE_POSITIONS[p.lane];
+      p.rig.root.position.set(px, p.baseY + Math.sin(this.time * 4.2 + p.z * 0.2) * 0.22, p.z);
+      p.rig.spinGroup.rotation.y += dt * 2.7;
+
+      const dx = Math.abs(px - this.player.x);
+      const dy = Math.abs(p.baseY - (this.player.y + 1.05));
+      if (dx < 1.35 && dy < 1.85 && Math.abs(p.z) < 1.5) {
+        const pickedType = p.type;
+        this.pools.spawnBurst(px, p.baseY, 0, 0x00f5d4, 12, 6.2);
+        this.pools.releasePowerUp(p);
+        this.collectPowerUp(pickedType);
+      }
+    }
+
+    // Advance pooled stations
+    for (let i = 0; i < this.pools.stations.length; i++) {
+      const st = this.pools.stations[i];
+      if (!st.inUse || !st.station) continue;
+      st.z += forwardStep;
+      st.rig.root.position.z = st.z;
+      if (!st.announced && st.z >= -28) {
+        st.announced = true;
+        this.currentStation = st.station;
+        this.lastStationName = st.station.nameEn;
+        this.stationBannerTimer = 3.2;
+        this.stationsPassed++;
+        this.sound.playStationChime(st.station.nameEn);
+        this.emitHud();
+      }
+      if (st.z > 42) {
+        this.pools.releaseStation(st);
+      }
+    }
+
+    // Advance pooled tunnel portals
+    for (let i = 0; i < this.pools.portals.length; i++) {
+      const po = this.pools.portals[i];
+      if (!po.inUse) continue;
+      po.z += forwardStep;
+      po.mesh.position.z = po.z;
+      if (!po.passed && po.z >= 0) {
+        po.passed = true;
+        this.applyZoneVisuals(po.targetZone);
+        this.showCallout(
+          po.targetZone === 'underground'
+            ? 'ENTERING MAJESTIC TUNNEL!'
+            : 'BACK ON ELEVATED VIADUCT!',
+          po.targetZone === 'underground' ? '#c084fc' : '#2dc653',
+        );
+        this.emitHud();
+      }
+      if (po.z > 30) {
+        this.pools.releasePortal(po);
+      }
+    }
+
+    // Advance chunk stream anchor & spawn ahead cleanly within fog horizon
+    this.nextChunkZ += forwardStep;
+    while (this.nextChunkZ > -104) {
+      this.spawnNextChunk();
+    }
+
+    // Evaluate hazard collisions
+    const invincible =
+      this.invincibilityTimer > 0 ||
+      this.kaapiTimer > 0 ||
+      this.droneTimer > 0 ||
+      this.headstartActive;
+    for (let i = 0; i < this.hazards.length; i++) {
       const h = this.hazards[i];
-      if (!h.active) continue;
       const outcome = evaluateHazardInteraction(
         {
           playerX: this.player.x,
@@ -1446,190 +1798,90 @@ export class MetroRunnerEngine implements RunnerEngine {
         h,
       );
 
+      if (outcome === 'none') continue;
+
       if (outcome === 'close_call') {
         h.closeCallTriggered = true;
         this.closeCalls++;
-        this.score += 150 * mult;
+        this.score += 55 * effectiveMult;
         this.sound.playCloseCall();
-        const q = CLOSE_CALL_QUIPS[this.closeCalls % CLOSE_CALL_QUIPS.length];
-        this.showCallout(`${q} +${150 * mult}`, '#FFD60A');
+        const quip = CLOSE_CALL_QUIPS[Math.floor(Math.random() * CLOSE_CALL_QUIPS.length)];
+        this.showCallout(quip, '#ffd60a');
+        this.emitHud();
       } else if (outcome === 'shield_break') {
+        // Subway Surfers Hoverboard Crash Shield: 25m shockwave blast clears nearby hazards + 1.25s i-frames!
         this.hoverboardTimer = 0;
-        this.runnerRig.hoverboardMount.visible = false;
         this.hoverboardCooldown = HOVERBOARD_COOLDOWN;
-        this.hitstopTimer = 0.06;
-        this.cameraTrauma = 0.72;
-        this.sound.playAutoHorn();
-        this.spawnBurst(this.player.x, this.player.y + 1.1, 0, 0xffd60a, 24);
-        this.showCallout('ಆಟೋ ಶೀಲ್ಡ್! AUTO SHIELD SAVED YOU!', '#2DC653');
-        for (let j = this.hazards.length - 1; j >= 0; j--) {
-          if (this.hazards[j].zEnd > -26 && this.hazards[j].zStart < 12) {
-            this.scene.remove(this.hazards[j].mesh);
-            disposeObject3D(this.hazards[j].mesh);
-            this.hazards.splice(j, 1);
-          }
-        }
+        this.runnerRig.hoverboardMount.visible = false;
+        this.player.activeBoardPerk = null;
+        this.invincibilityTimer = 1.25;
+        this.shakeTime = 0.34;
+        this.shakeIntensity = 0.55;
+        this.sound.playShockwave();
+        this.pools.triggerShockwave(this.player.x, this.player.y + 0.3, this.getActiveBoardGlowColor());
+        this.clearHazardsInRadius(25);
+        this.showCallout('HOVERBOARD SHOCKWAVE SAVED YOU!', '#00f5d4');
+        this.emitHud();
         break;
       } else if (outcome === 'stumble') {
-        if (this.stumbleGraceTimer > 0) continue;
-        // CRITICAL FIX: NEVER disable the train collider! Push the runner cleanly
-        // back to the safe adjacent lane outside the train wall so you NEVER pass through trains.
-        const trainX = LANE_POSITIONS[h.lane];
-        const pushDir = this.player.x < trainX ? -1 : 1;
-        let safeLane = Math.max(0, Math.min(2, h.lane + pushDir));
-        if (safeLane === h.lane) {
-          safeLane = this.player.lastSafeLane !== h.lane ? this.player.lastSafeLane : h.lane === 0 ? 1 : 0;
-        }
-        this.player.lane = safeLane;
-        this.player.lastSafeLane = safeLane;
-        this.player.x = trainX + (safeLane < h.lane ? -1.85 : 1.85);
-        this.player.bufferedAction = 'none';
-        this.player.bufferTimer = 0;
-        this.stumbleGraceTimer = 0.28;
+        // Side-bump stumble: push back toward safe lane, Inspector & street dog surge right behind for 8s!
+        this.player.lane = this.player.lastSafeLane;
+        this.player.laneFromX = this.player.x;
+        this.player.laneTargetX = LANE_POSITIONS[this.player.lane];
+        this.player.laneTransitionElapsed = 0;
+        this.player.laneTransitionDuration = 0.12;
         this.chaserTimer = STUMBLE_CHASE_WINDOW;
-        this.cameraTrauma = 0.55;
-        this.hitstopTimer = 0.04;
+        this.invincibilityTimer = 0.65;
+        this.shakeTime = 0.24;
+        this.shakeIntensity = 0.38;
         this.sound.playStumble();
-        this.spawnBurst(this.player.x, this.player.y + 1.0, 0, 0xdc2626, 12);
-        this.showCallout('ಹುಷಾರು! INSPECTOR ON YOUR TAIL!', '#FFD60A');
+        this.pools.spawnBurst(this.player.x, this.player.y + 1.0, 0, 0xf59e0b, 10, 5.5);
+        this.showCallout('CAREFUL! INSPECTOR ON YOUR TAIL!', '#f97316');
+        this.emitHud();
+        break;
       } else if (outcome === 'crash') {
-        this.triggerCrash();
+        this.triggerGameOver();
         break;
       }
     }
 
-    const magnetOn = this.magnetTimer > 0;
-    for (let i = this.tokens.length - 1; i >= 0; i--) {
-      const tk = this.tokens[i];
-      tk.z += dz;
-      tk.mesh.rotation.y += dt * 4.2;
-      if (magnetOn && tk.z > -18 && tk.z < 4) {
-        const pull = 1 - Math.exp(-13 * dt);
-        tk.x += (this.player.x - tk.x) * pull;
-        tk.y += (this.player.y + 1.15 - tk.y) * pull;
-        tk.z += (0 - tk.z) * pull * 0.45;
-      }
-      tk.mesh.position.set(tk.x, tk.y + Math.sin(this.elapsed * 5 + i) * 0.1, tk.z);
+    // Chaser pursuit position
+    this.prevChaserZ = this.chaserZ;
+    const targetChaserZ = this.chaserTimer > 0 ? 2.45 : 9.8;
+    this.chaserZ += (targetChaserZ - this.chaserZ) * (1 - Math.exp(-5.5 * dt));
 
-      if (
-        !tk.collected &&
-        Math.abs(tk.x - this.player.x) < 1.15 &&
-        Math.abs(tk.y - (this.player.y + 1.0)) < 1.45 &&
-        Math.abs(tk.z) < 1.35
-      ) {
-        tk.collected = true;
-        this.runTokens++;
-        this.score += 25 * mult;
-        this.sound.playToken();
-        this.spawnBurst(tk.x, tk.y, tk.z, 0xffd60a, 5);
-        this.scene.remove(tk.mesh);
-        disposeObject3D(tk.mesh);
-        this.tokens.splice(i, 1);
-        continue;
-      }
-      if (tk.z > 16) {
-        this.scene.remove(tk.mesh);
-        disposeObject3D(tk.mesh);
-        this.tokens.splice(i, 1);
-      }
-    }
-
-    for (let i = this.powerUps.length - 1; i >= 0; i--) {
-      const pu = this.powerUps[i];
-      pu.z += dz;
-      pu.mesh.rotation.y += dt * 2.8;
-      pu.mesh.position.set(LANE_POSITIONS[pu.lane], pu.y + Math.sin(this.elapsed * 4.5 + i) * 0.22, pu.z);
-
-      if (
-        !pu.collected &&
-        Math.abs(LANE_POSITIONS[pu.lane] - this.player.x) < 1.25 &&
-        Math.abs(pu.y - (this.player.y + 1.0)) < 1.75 &&
-        Math.abs(pu.z) < 1.5
-      ) {
-        pu.collected = true;
-        this.activatePowerUp(pu.type);
-        this.scene.remove(pu.mesh);
-        disposeObject3D(pu.mesh);
-        this.powerUps.splice(i, 1);
-        continue;
-      }
-      if (pu.z > 16) {
-        this.scene.remove(pu.mesh);
-        disposeObject3D(pu.mesh);
-        this.powerUps.splice(i, 1);
-      }
-    }
-
-    const nextWeather =
-      this.zone === 'underground'
-        ? 'sunny'
-        : this.weatherOverride ?? getWeatherForDistance(this.distance, this.zone);
-    if (nextWeather !== this.weather) {
-      this.weather = nextWeather;
-      if (nextWeather === 'heavy_monsoon') {
-        this.showCallout('HEAVY MONSOON! SLIPPERY TRACK!', '#38BDF8');
-      } else if (nextWeather === 'light_rain') {
-        this.showCallout('LIGHT RAIN · ಸಣ್ಣ ಮಳೆ', '#93C5FD');
-      } else {
-        this.showCallout('SUNNY SKIES · ಬಿಸಿಲು', '#FFD60A');
-      }
-      this.pushHud(true);
-    }
-    if (this.weather === 'heavy_monsoon' && this.player.grounded && Math.random() < 0.38) {
-      this.spawnBurst(this.player.x, this.player.y + 0.08, 0.2, 0xbae6fd, 1);
-    }
-    this.updateAtmosphere(dt);
-    this.updateWeatherParticles(dt, dz);
-    this.updateRunnerAnim(dt, speed);
-    this.updateChaserAnim(dt, speed);
-    this.updateParticles(dt);
-    this.updateCamera(dt, speed);
-
-    if (this.elapsed - this.lastHudPush >= 0.1) this.pushHud(false);
+    // Scroll static instanced environment & VFX
+    this.updateStaticScenery(forwardStep);
+    this.pools.updateSparks(dt, forwardStep);
+    this.pools.updateShockwave(dt);
+    const ribbonActive =
+      this.hoverboardTimer > 0 || this.droneTimer > 0 || this.kaapiTimer > 0 || this.headstartActive;
+    const ribbonColor =
+      this.kaapiTimer > 0 || this.headstartActive
+        ? 0xffd60a
+        : this.droneTimer > 0
+          ? 0x00f5d4
+          : this.getActiveBoardGlowColor();
+    this.pools.updateRibbon(
+      dt,
+      forwardStep,
+      ribbonActive,
+      this.player.x,
+      this.player.y + (this.droneTimer > 0 ? 0.9 : 0.28),
+      ribbonColor,
+    );
   }
 
-  private activatePowerUp(type: PowerUpType): void {
-    this.sound.playPowerUp();
-    if (type === 'kaapi') {
-      this.kaapiDuration = getPowerUpDuration(this.profile, 'kaapi');
-      this.kaapiTimer = this.kaapiDuration;
-      this.kaapiUsed++;
-      this.cameraTrauma = 0.3;
-      this.spawnBurst(this.player.x, this.player.y + 1.2, 0, 0xf59e0b, 20);
-      this.showCallout(SPEED_BOOST_QUIPS[this.kaapiUsed % SPEED_BOOST_QUIPS.length], '#F59E0B');
-    } else if (type === 'magnet') {
-      this.magnetDuration = getPowerUpDuration(this.profile, 'magnet');
-      this.magnetTimer = this.magnetDuration;
-      this.spawnBurst(this.player.x, this.player.y + 1.2, 0, 0xeab308, 18);
-      this.showCallout('MASALA DOSA MAGNET!', '#EAB308');
-    } else {
-      this.droneDuration = getPowerUpDuration(this.profile, 'drone');
-      this.droneTimer = this.droneDuration;
-      this.player.droneActive = true;
-      this.runnerRig.droneMount.visible = true;
-      this.spawnBurst(this.player.x, this.player.y + 1.5, 0, 0x00f5d4, 22);
-      this.showCallout('STARTUP DRONE FLIGHT!', '#00F5D4');
-      this.spawnTokenLine(1, -22, 10, DRONE_FLIGHT_Y + 0.8, 3.4, 1.0);
-    }
-    this.triggerVoiceOver(type);
-    this.pushHud(true);
-  }
-
-  private triggerCrash(): void {
-    this.crashPending = true;
-    this.crashDelayTimer = 0.55;
-    this.hitstopTimer = 0.07;
-    this.cameraTrauma = 0.95;
+  private triggerGameOver(): void {
+    this.mode = 'gameover';
+    this.crashTimer = 0;
+    this.shakeTime = 0.42;
+    this.shakeIntensity = 0.72;
     this.sound.stopMusic();
     this.sound.playCrash();
-    this.spawnBurst(this.player.x, this.player.y + 1.1, 0, 0xff4d8d, 24);
-    this.spawnBurst(this.player.x, this.player.y + 1.1, 0, 0xffd60a, 14);
-  }
-
-  private finalizeGameOver(): void {
-    this.crashPending = false;
-    this.mode = 'gameover';
+    this.pools.spawnBurst(this.player.x, this.player.y + 1.1, 0, 0xef4444, 18, 7.5);
     this.gameOverQuip = GAME_OVER_QUIPS[Math.floor(Math.random() * GAME_OVER_QUIPS.length)];
+
     const summary: RunSummary = {
       score: Math.round(this.score),
       distance: Math.round(this.distance),
@@ -1637,392 +1889,560 @@ export class MetroRunnerEngine implements RunnerEngine {
       stationsPassed: this.stationsPassed,
       kaapiUsed: this.kaapiUsed,
       closeCalls: this.closeCalls,
+      mysteryBoxes: this.mysteryBoxesCollected > 0 ? this.mysteryBoxesCollected : undefined,
+      mysteryBonusTokens: this.mysteryBonusTokens > 0 ? this.mysteryBonusTokens : undefined,
+      mysteryRewardLabel: this.lastMysteryRewardLabel || undefined,
     };
     this.runSummary = summary;
+    this.emitHud();
     this.onRunEnd(summary);
-    this.pushHud(true);
   }
 
-  private stepLobby(dt: number): void {
-    const orbit = Math.sin(this.elapsed * 0.45) * 0.3 + 0.32;
-    const r = this.framing.lobbyRadius;
+  /**
+   * Renders interpolated transforms & expressive Subway Surfers/Fortnite procedural
+   * biomechanics for the runner, Metro Inspector + street dog, trains, sky, and camera.
+   */
+  private updateVisuals(frameDt: number, alpha: number): void {
+    // Smooth world curvature sweeping gently left/right across Bengaluru districts!
+    const curveBend =
+      this.mode === 'title'
+        ? 0.0005
+        : Math.sin(this.distance * 0.0042) * 0.00115;
+    this.uniforms.uCurveX.value += (curveBend - this.uniforms.uCurveX.value) * Math.min(1, frameDt * 2.2);
+    // Positive uCurveY subtracts (uCurveY * dz^2) in vertex shader -> gentle downward Subway Surfers horizon drop!
+    this.uniforms.uCurveY.value = 0.00068;
+
+    // Smooth sky & rain weather transition
+    this.updateSkyAndLightingForWeather(Math.min(1, frameDt * 2.6));
+    this.pools.updateRain(frameDt, this.rainIntensity, this.player.x, this.zone === 'underground');
+
+    // Sync interpolated hazard transforms
+    for (let i = 0; i < this.hazards.length; i++) {
+      const h = this.hazards[i];
+      const interpZ = lerpNumber(h.prevZCenter, h.zCenter, alpha);
+      const laneX = LANE_POSITIONS[h.lane];
+      if (h.trainSlot) {
+        h.trainSlot.mesh.position.set(laneX, 0, interpZ);
+      } else if (h.obstacleSlot) {
+        h.obstacleSlot.mesh.position.set(laneX, 0, interpZ);
+      }
+    }
+
+    if (this.mode === 'title') {
+      this.animateLobby(frameDt);
+      return;
+    }
+
+    const interpX = lerpNumber(this.player.prevX, this.player.x, alpha);
+    const interpY = lerpNumber(this.player.prevY, this.player.y, alpha);
+    const interpChaserZ = lerpNumber(this.prevChaserZ, this.chaserZ, alpha);
+
+    // Update tight player-tracking directional shadow frustum
+    if (this.sunLight.castShadow) {
+      this.sunLight.position.set(interpX + 16, 32, 10);
+      this.sunLight.target.position.set(interpX, 0, -16);
+      this.sunLight.target.updateMatrixWorld();
+    }
+
+    this.animateRunner(frameDt, interpX, interpY);
+    this.animateChaser(frameDt, interpX, interpChaserZ);
+    this.updateCamera(frameDt, interpX, interpY);
+  }
+
+  private animateLobby(dt: number): void {
+    const t = this.time;
+    this.runnerRig.root.position.set(0, Math.sin(t * 2.5) * 0.03, 0);
+    this.runnerRig.root.rotation.set(0, Math.PI + Math.sin(t * 0.8) * 0.16, 0);
+    this.runnerRig.bodyGroup.position.y = 0;
+    this.runnerRig.bodyGroup.rotation.set(0, 0, 0);
+    this.runnerRig.torsoGroup.rotation.set(0, Math.sin(t * 1.4) * 0.08, 0);
+    this.runnerRig.headGroup.rotation.set(Math.sin(t * 1.6) * 0.06, Math.sin(t * 1.1) * 0.14, 0);
+    this.runnerRig.leftLeg.rotation.set(0, 0, 0);
+    this.runnerRig.rightLeg.rotation.set(0, 0, 0);
+    this.runnerRig.leftShin.rotation.set(0, 0, 0);
+    this.runnerRig.rightShin.rotation.set(0, 0, 0);
+
+    if (this.lobbyWaveTimer > 0) {
+      this.lobbyWaveTimer = Math.max(0, this.lobbyWaveTimer - dt);
+      this.runnerRig.rightArm.rotation.set(0, 0, -2.55 + Math.sin(t * 16) * 0.25);
+      this.runnerRig.rightForearm.rotation.set(0, 0, -0.35);
+    } else {
+      this.runnerRig.rightArm.rotation.set(0.08, 0, -0.14 + Math.sin(t * 2.2) * 0.04);
+      this.runnerRig.rightForearm.rotation.set(-0.22, 0, 0);
+    }
+    this.runnerRig.leftArm.rotation.set(-0.06, 0, 0.14 - Math.sin(t * 2.2) * 0.04);
+    this.runnerRig.leftForearm.rotation.set(-0.2, 0, 0);
+
+    // Animate Inspector & street dog idling visibly on the viaduct beside the hero
+    this.chaserRig.root.visible = true;
+    this.chaserRig.root.position.set(2.4, 0, -2.5);
+    this.chaserRig.root.rotation.set(0, Math.PI - 0.35 + Math.sin(t * 1.2) * 0.1, 0);
+    this.chaserRig.dogTail.rotation.z = Math.sin(t * 12) * 0.42;
+    this.chaserRig.dogGroup.position.y = Math.abs(Math.sin(t * 4.5)) * 0.06;
+
+    // Heroic angled lobby camera showing character, parked BEML Purple Line train, viaduct & sky!
+    const angle = Math.sin(t * 0.35) * 0.24;
     this.camera.position.set(
-      Math.sin(orbit) * r + 0.25,
-      this.framing.lobbyY + Math.sin(this.elapsed * 0.7) * 0.12,
-      Math.cos(orbit) * r + 0.35,
+      Math.sin(angle) * this.framing.lobbyRadius + 0.85,
+      this.framing.lobbyY,
+      Math.cos(angle) * this.framing.lobbyRadius,
     );
-    this.camera.lookAt(0, this.framing.lobbyLookY, -0.6);
+    _camLook.set(-0.35, this.framing.lobbyLookY, -2.4);
+    this.camera.lookAt(_camLook);
 
-    if (Math.abs(this.camera.fov - this.framing.fov) > 0.2) {
-      this.camera.fov = THREE.MathUtils.damp(this.camera.fov, this.framing.fov, 8, dt);
+    const targetFov = this.framing.fov;
+    if (Math.abs(this.currentFov - targetFov) > 0.01) {
+      this.currentFov = targetFov;
+      this.camera.fov = targetFov;
       this.camera.updateProjectionMatrix();
     }
-
-    let hopY = 0;
-    if (this.lobbyHopTimer > 0) {
-      this.lobbyHopTimer = Math.max(0, this.lobbyHopTimer - dt);
-      hopY = Math.sin((this.lobbyHopTimer / 0.55) * Math.PI) * 1.15;
-    }
-    const bob = Math.sin(this.elapsed * 3.2) * 0.04;
-    this.runnerRig.root.position.set(0, hopY, 0);
-    this.runnerRig.bodyGroup.position.y = bob;
-    this.runnerRig.bodyGroup.rotation.set(0, Math.PI - 0.16 + Math.sin(this.elapsed * 0.9) * 0.08, 0);
-    this.runnerRig.leftArm.rotation.x = this.lobbyHopTimer > 0 ? -2.2 : Math.sin(this.elapsed * 2.4) * 0.16;
-    this.runnerRig.rightArm.rotation.x = this.lobbyHopTimer > 0 ? -2.2 : -Math.sin(this.elapsed * 2.4) * 0.16;
-    this.runnerRig.leftLeg.rotation.x = 0;
-    this.runnerRig.rightLeg.rotation.x = 0;
-
-    this.lobbyTrain.visible = true;
-    this.lobbyTrain.position.x = -LANE_POSITIONS[2];
-    this.lobbyTrain.position.z += 22 * dt;
-    if (this.lobbyTrain.position.z > 48) this.lobbyTrain.position.z = -95;
-
-    for (const cloud of this.clouds) {
-      cloud.visible = true;
-      cloud.position.z += 2.2 * dt;
-      if (cloud.position.z > 24) cloud.position.z -= 180;
-    }
-
-    (this.scene.background as THREE.Color).lerp(_elevatedSky, 1 - Math.exp(-4 * dt));
-    this.fog.color.lerp(_elevatedSky, 1 - Math.exp(-4 * dt));
-    this.sunLight.intensity = THREE.MathUtils.damp(this.sunLight.intensity, 1.85, 4, dt);
-    this.hemiLight.intensity = THREE.MathUtils.damp(this.hemiLight.intensity, 1.05, 4, dt);
-    this.tunnelLight.intensity = 0;
   }
 
-  private updateAtmosphere(dt: number): void {
-    const isUg = this.zone === 'underground';
-    if (isUg) {
-      _targetSky.copy(_undergroundSky);
-      _targetFog.setHex(0x140d29);
-    } else if (this.weather === 'heavy_monsoon') {
-      _targetSky.copy(_heavyMonsoonSky);
-      _targetFog.setHex(0x334968);
-    } else if (this.weather === 'light_rain') {
-      _targetSky.copy(_lightRainSky);
-      _targetFog.setHex(0x89a8c9);
+  private animateRunner(dt: number, x: number, y: number): void {
+    const rig = this.runnerRig;
+    const isGameOver = this.mode === 'gameover';
+    rig.root.position.set(x, y, 0);
+
+    // Grounded contact shadow stays cleanly anchored to track or train roof below runner
+    const shadowHeight = Math.max(0, y);
+    rig.contactShadow.position.y = -shadowHeight + 0.03;
+    const shadowScale = Math.max(0.32, 1 - shadowHeight * 0.14);
+    rig.contactShadow.scale.setScalar(shadowScale);
+
+    // Invincibility blink
+    if (this.invincibilityTimer > 0 && this.droneTimer <= 0 && !this.headstartActive && this.kaapiTimer <= 0) {
+      rig.bodyGroup.visible = Math.floor(this.time * 18) % 2 === 0;
     } else {
-      _targetSky.copy(_elevatedSky);
-      _targetFog.setHex(0x88d4fc);
+      rig.bodyGroup.visible = true;
     }
 
-    const alpha = 1 - Math.exp(-2.8 * dt);
-    (this.scene.background as THREE.Color).lerp(_targetSky, alpha);
-    this.fog.color.lerp(_targetFog, alpha);
-    this.fog.near = THREE.MathUtils.damp(
-      this.fog.near,
-      isUg ? 24 : this.weather === 'heavy_monsoon' ? 28 : 48,
-      3,
-      dt,
-    );
-    this.fog.far = THREE.MathUtils.damp(
-      this.fog.far,
-      isUg ? 115 : this.weather === 'heavy_monsoon' ? 128 : 175,
-      3,
-      dt,
-    );
-    this.sunLight.intensity = THREE.MathUtils.damp(
-      this.sunLight.intensity,
-      isUg ? 0.35 : this.weather === 'heavy_monsoon' ? 0.85 : this.weather === 'light_rain' ? 1.35 : 1.85,
-      3,
-      dt,
-    );
-    this.hemiLight.intensity = THREE.MathUtils.damp(
-      this.hemiLight.intensity,
-      isUg ? 0.72 : this.weather === 'heavy_monsoon' ? 0.82 : 1.08,
-      3,
-      dt,
-    );
-    this.tunnelLight.intensity = THREE.MathUtils.damp(this.tunnelLight.intensity, isUg ? 3.2 : 0, 4, dt);
-    this.tunnelLight.position.set(this.player.x, 5.2, -5);
+    if (isGameOver) {
+      this.crashTimer = Math.min(1, this.crashTimer + dt * 2.4);
+      rig.bodyGroup.rotation.set(-this.crashTimer * 1.15, 0, this.crashTimer * 0.4);
+      rig.bodyGroup.position.y = 0.25 * (1 - this.crashTimer);
+      return;
+    }
 
-    if (this.deckMat) {
-      const targetRoughness =
-        this.weather === 'heavy_monsoon' ? 0.24 : this.weather === 'light_rain' ? 0.48 : 0.72;
-      const targetMetalness =
-        this.weather === 'heavy_monsoon' ? 0.36 : this.weather === 'light_rain' ? 0.22 : 0.14;
-      this.deckMat.roughness = THREE.MathUtils.damp(this.deckMat.roughness, targetRoughness, 3.5, dt);
-      this.deckMat.metalness = THREE.MathUtils.damp(this.deckMat.metalness, targetMetalness, 3.5, dt);
+    const bankZ = Math.max(-0.36, Math.min(0.36, -this.player.vx * 0.016));
+    rig.root.scale.set(this.player.scaleX, this.player.scaleY, this.player.scaleZ);
+
+    // Drone flying pose
+    if (this.droneTimer > 0) {
+      rig.bodyGroup.position.y = 0.1 + Math.sin(this.time * 8) * 0.08;
+      rig.bodyGroup.rotation.set(0.38, 0, bankZ * 1.3);
+      rig.torsoGroup.rotation.set(0.12, 0, 0);
+      rig.leftArm.rotation.set(-0.45, 0, 0.35);
+      rig.rightArm.rotation.set(-0.45, 0, -0.35);
+      rig.leftLeg.rotation.set(0.35, 0, 0);
+      rig.rightLeg.rotation.set(0.5, 0, 0);
+      rig.leftShin.rotation.set(0.4, 0, 0);
+      rig.rightShin.rotation.set(0.55, 0, 0);
+      for (let i = 0; i < rig.droneRotors.length; i++) {
+        rig.droneRotors[i].rotation.y += dt * 36;
+      }
+      return;
+    }
+
+    // Sideways hoverboard surfing stance + dynamic carve banking!
+    if (this.hoverboardTimer > 0) {
+      const hoverBob = Math.sin(this.time * 10) * 0.06;
+      rig.hoverboardMount.position.set(0, hoverBob, 0);
+      rig.hoverboardMount.rotation.set(0, 0, bankZ * 1.35);
+      rig.bodyGroup.position.set(0, 0.32 + hoverBob, 0);
+      rig.bodyGroup.rotation.set(0.08, 0.55, bankZ * 1.25);
+      rig.torsoGroup.rotation.set(0.14, -0.35, 0);
+      rig.leftArm.rotation.set(0.1, 0, 0.65);
+      rig.rightArm.rotation.set(-0.1, 0, -0.65);
+      rig.leftForearm.rotation.set(-0.25, 0, 0);
+      rig.rightForearm.rotation.set(-0.25, 0, 0);
+      rig.leftLeg.rotation.set(-0.22, 0, 0.15);
+      rig.rightLeg.rotation.set(0.22, 0, -0.15);
+      rig.leftShin.rotation.set(0.3, 0, 0);
+      rig.rightShin.rotation.set(0.28, 0, 0);
+      return;
+    }
+
+    // Tucked barrel roll!
+    if (this.player.rolling) {
+      const rollProgress = 1 - this.player.rollTimer / 0.62;
+      rig.bodyGroup.position.y = 0.42;
+      rig.bodyGroup.rotation.set(-rollProgress * Math.PI * 2, 0, bankZ * 0.5);
+      rig.leftLeg.rotation.set(-0.9, 0, 0);
+      rig.rightLeg.rotation.set(-0.9, 0, 0);
+      rig.leftShin.rotation.set(1.2, 0, 0);
+      rig.rightShin.rotation.set(1.2, 0, 0);
+      rig.leftArm.rotation.set(-0.85, 0, 0.25);
+      rig.rightArm.rotation.set(-0.85, 0, -0.25);
+      return;
+    }
+
+    // Mid-air athletic jump tuck
+    if (!this.player.grounded) {
+      const rise = Math.max(-1, Math.min(1, this.player.vy / 18));
+      rig.bodyGroup.position.y = 0;
+      rig.bodyGroup.rotation.set(0.18 - rise * 0.14, 0, bankZ);
+      rig.torsoGroup.rotation.set(0.16, 0, 0);
+      rig.leftArm.rotation.set(-0.95 - rise * 0.35, 0, 0.35);
+      rig.rightArm.rotation.set(-0.75 - rise * 0.35, 0, -0.35);
+      rig.leftForearm.rotation.set(-0.6, 0, 0);
+      rig.rightForearm.rotation.set(-0.6, 0, 0);
+      rig.leftLeg.rotation.set(-0.82, 0, 0);
+      rig.rightLeg.rotation.set(0.32, 0, 0);
+      rig.leftShin.rotation.set(1.15, 0, 0);
+      rig.rightShin.rotation.set(0.55, 0, 0);
+      return;
+    }
+
+    // Expressive Subway Surfers sprint cycle with pelvis bob, shoulder/hip twist, and knee/elbow snap
+    const cadence = this.kaapiTimer > 0 || this.headstartActive ? 22 : 16.5;
+    const cycle = this.time * cadence;
+    const swing = Math.sin(cycle);
+    const cosSwing = Math.cos(cycle);
+
+    rig.bodyGroup.position.y = Math.abs(cosSwing) * 0.11;
+    rig.bodyGroup.rotation.set(0.16, 0, bankZ);
+    rig.torsoGroup.rotation.set(0.12, swing * 0.16, -swing * 0.05);
+    rig.headGroup.rotation.set(-0.08, -swing * 0.1, 0);
+
+    rig.leftLeg.rotation.set(swing * 0.92, 0, 0);
+    rig.rightLeg.rotation.set(-swing * 0.92, 0, 0);
+    rig.leftShin.rotation.set(Math.max(0.08, -cosSwing * 0.95 + 0.38), 0, 0);
+    rig.rightShin.rotation.set(Math.max(0.08, cosSwing * 0.95 + 0.38), 0, 0);
+
+    rig.leftArm.rotation.set(-swing * 0.85, 0, 0.14);
+    rig.rightArm.rotation.set(swing * 0.85, 0, -0.14);
+    rig.leftForearm.rotation.set(-0.75 - Math.max(0, -swing) * 0.45, 0, 0);
+    rig.rightForearm.rotation.set(-0.75 - Math.max(0, swing) * 0.45, 0, 0);
+  }
+
+  private animateChaser(dt: number, playerX: number, chaserZ: number): void {
+    const visible = chaserZ < 8.8 || this.mode === 'gameover';
+    this.chaserRig.root.visible = visible;
+    if (!visible) return;
+
+    const targetX = playerX * 0.88;
+    const currX = this.chaserRig.root.position.x;
+    this.chaserRig.root.position.set(
+      currX + (targetX - currX) * Math.min(1, dt * 8.5),
+      0,
+      this.mode === 'gameover' ? 1.55 : chaserZ,
+    );
+    this.chaserRig.root.rotation.set(0, 0, 0);
+
+    const c = this.time * 15;
+    const s = Math.sin(c);
+    this.chaserRig.inspectorBody.position.y = Math.abs(Math.cos(c)) * 0.09;
+    this.chaserRig.leftLeg.rotation.x = s * 0.78;
+    this.chaserRig.rightLeg.rotation.x = -s * 0.78;
+    this.chaserRig.leftArm.rotation.x = -s * 0.72;
+    this.chaserRig.rightArm.rotation.x = s * 0.72;
+
+    // Animated playful Bengaluru street dog galloping alongside the Inspector
+    const dogCycle = this.time * 19;
+    this.chaserRig.dogGroup.position.y = Math.abs(Math.sin(dogCycle)) * 0.14;
+    this.chaserRig.dogGroup.rotation.x = Math.cos(dogCycle) * 0.12;
+    this.chaserRig.dogTail.rotation.z = Math.sin(dogCycle * 1.4) * 0.55;
+    for (let i = 0; i < this.chaserRig.dogLegs.length; i++) {
+      const phase = i === 0 ? 0 : Math.PI;
+      this.chaserRig.dogLegs[i].rotation.x = Math.sin(dogCycle + phase) * 0.85;
     }
   }
 
-  private updateWeatherParticles(dt: number, dz: number): void {
-    const show =
-      this.zone === 'elevated' &&
-      (this.weather === 'light_rain' || this.weather === 'heavy_monsoon');
-    this.weatherMesh.visible = show;
-    if (!show) return;
-
-    const isMonsoon = this.weather === 'heavy_monsoon';
-    const activeCount = isMonsoon ? this.weatherDrops.length : Math.floor(this.weatherDrops.length * 0.36);
-    _colScratch.setHex(isMonsoon ? 0xbae6fd : 0xe0f2fe);
-
-    for (let i = 0; i < this.weatherDrops.length; i++) {
-      if (i >= activeCount) {
-        _dummy.position.set(0, -60, 0);
-        _dummy.scale.set(0, 0, 0);
-        _dummy.updateMatrix();
-        this.weatherMesh.setMatrixAt(i, _dummy.matrix);
-        continue;
-      }
-
-      const wp = this.weatherDrops[i];
-      wp.y += (isMonsoon ? wp.vy * 4.2 : wp.vy * 2.4) * dt;
-      wp.x += (isMonsoon ? -6.8 : -2.4) * dt;
-      wp.z += dz * (isMonsoon ? 0.85 : 0.55);
-
-      if (wp.y < -1 || wp.z > 10 || wp.x < -18) {
-        wp.x = (Math.random() - 0.5) * 32 + (isMonsoon ? 4 : 1);
-        wp.y = 14 + Math.random() * 10;
-        wp.z = -Math.random() * 55 + 6;
-      }
-
-      _dummy.position.set(wp.x, wp.y, wp.z);
-      _dummy.rotation.set(0, 0, isMonsoon ? -0.32 : -0.16);
-      _dummy.scale.set(isMonsoon ? 0.42 : 0.28, isMonsoon ? 3.8 : 2.1, 0.32);
-      _dummy.updateMatrix();
-      this.weatherMesh.setMatrixAt(i, _dummy.matrix);
-      this.weatherMesh.setColorAt(i, _colScratch);
+  private updateCamera(dt: number, playerX: number, playerY: number): void {
+    // Silky 0.65s lobby-to-chase camera transition when starting a run!
+    if (this.lobbyTransition < 1) {
+      this.lobbyTransition = Math.min(1, this.lobbyTransition + dt / 0.65);
     }
-    this.weatherMesh.instanceMatrix.needsUpdate = true;
-    if (this.weatherMesh.instanceColor) this.weatherMesh.instanceColor.needsUpdate = true;
-  }
+    const ease = 1 - Math.pow(1 - this.lobbyTransition, 3);
 
-  private updateRunnerAnim(dt: number, speed: number): void {
-    const hoverActive = this.hoverboardTimer > 0;
-    const hoverLift = hoverActive ? 0.42 + Math.sin(this.elapsed * 9) * 0.06 : 0;
+    let shakeX = 0;
+    let shakeY = 0;
+    if (this.shakeTime > 0) {
+      this.shakeTime = Math.max(0, this.shakeTime - dt);
+      const decay = this.shakeTime * 2.8;
+      shakeX = (Math.random() - 0.5) * this.shakeIntensity * decay;
+      shakeY = (Math.random() - 0.5) * this.shakeIntensity * decay;
+    }
 
-    this.runnerRig.root.position.set(this.player.x, this.player.y, 0);
-    this.runnerRig.bodyGroup.position.y = hoverLift;
-    this.runnerRig.bodyGroup.scale.set(this.player.scaleX, this.player.scaleY, this.player.scaleZ);
+    const droneBoost = this.droneTimer > 0 ? 1.85 : 0;
+    const boostPull = this.kaapiTimer > 0 || this.headstartActive ? 0.65 : 0;
 
-    const bank = (LANE_POSITIONS[this.player.lane] - this.player.x) * -0.14;
-    this.runnerRig.bodyGroup.rotation.z = THREE.MathUtils.damp(this.runnerRig.bodyGroup.rotation.z, bank, 14, dt);
+    _chaseCamPos.set(
+      playerX * 0.64 + shakeX,
+      this.framing.chaseY + playerY * 0.58 + droneBoost + shakeY,
+      this.framing.chaseZ + boostPull,
+    );
+    _chaseLookPos.set(playerX * 0.38, 1.8 + playerY * 0.48 + droneBoost * 0.4, -14.5);
 
-    if (this.player.droneActive) {
-      this.runnerRig.bodyGroup.rotation.x = THREE.MathUtils.damp(this.runnerRig.bodyGroup.rotation.x, -0.48, 8, dt);
-      this.runnerRig.leftLeg.rotation.x = 0.35;
-      this.runnerRig.rightLeg.rotation.x = 0.25;
-      this.runnerRig.leftArm.rotation.x = -0.5;
-      this.runnerRig.rightArm.rotation.x = -0.5;
-    } else if (hoverActive) {
-      this.runnerRig.bodyGroup.rotation.x = THREE.MathUtils.damp(this.runnerRig.bodyGroup.rotation.x, -0.1, 10, dt);
-      this.runnerRig.bodyGroup.rotation.y = THREE.MathUtils.damp(this.runnerRig.bodyGroup.rotation.y, 0.55, 10, dt);
-      this.runnerRig.leftLeg.rotation.x = 0.15;
-      this.runnerRig.rightLeg.rotation.x = -0.15;
-      this.runnerRig.leftArm.rotation.z = -0.55;
-      this.runnerRig.rightArm.rotation.z = 0.55;
-      this.runnerRig.hoverboardMount.rotation.z = bank * 1.4;
+    if (ease < 1) {
+      _lobbyCamPos.set(0.85, this.framing.lobbyY, this.framing.lobbyRadius);
+      _lobbyLookPos.set(-0.35, this.framing.lobbyLookY, -2.4);
+      _camTarget.lerpVectors(_lobbyCamPos, _chaseCamPos, ease);
+      _camLook.lerpVectors(_lobbyLookPos, _chaseLookPos, ease);
+      this.camera.position.copy(_camTarget);
+      this.camera.lookAt(_camLook);
     } else {
-      this.runnerRig.bodyGroup.rotation.y = THREE.MathUtils.damp(this.runnerRig.bodyGroup.rotation.y, 0, 12, dt);
-      this.runnerRig.leftArm.rotation.z = 0;
-      this.runnerRig.rightArm.rotation.z = 0;
-
-      if (this.player.rolling) {
-        this.runnerRig.bodyGroup.rotation.x = THREE.MathUtils.damp(this.runnerRig.bodyGroup.rotation.x, -0.65, 16, dt);
-      } else if (!this.player.grounded) {
-        this.runnerRig.bodyGroup.rotation.x = THREE.MathUtils.damp(this.runnerRig.bodyGroup.rotation.x, -0.2, 10, dt);
-        this.runnerRig.leftLeg.rotation.x = -0.65;
-        this.runnerRig.rightLeg.rotation.x = 0.45;
-        this.runnerRig.leftArm.rotation.x = -1.0;
-        this.runnerRig.rightArm.rotation.x = 0.7;
-      } else {
-        this.runnerRig.bodyGroup.rotation.x = THREE.MathUtils.damp(this.runnerRig.bodyGroup.rotation.x, -0.14, 12, dt);
-        const phase = this.distance * 1.45;
-        const swing = Math.sin(phase) * (0.85 + Math.min(0.25, speed * 0.005));
-        this.runnerRig.leftLeg.rotation.x = swing;
-        this.runnerRig.rightLeg.rotation.x = -swing;
-        this.runnerRig.leftArm.rotation.x = -swing * 0.9;
-        this.runnerRig.rightArm.rotation.x = swing * 0.9;
-      }
+      const followAlpha = 1 - Math.exp(-11.5 * dt);
+      this.camera.position.lerp(_chaseCamPos, followAlpha);
+      this.camera.lookAt(_chaseLookPos);
     }
 
-    const s = Math.max(0.35, 1 - this.player.y * 0.08);
-    this.runnerRig.contactShadow.scale.set(s, s, 1);
-  }
-
-  private updateChaserAnim(dt: number, speed: number): void {
-    const active = this.chaserTimer > 0 && !this.player.droneActive;
-    const targetZ = active ? 2.85 : 11.5;
-    this.chaserRig.root.position.z = THREE.MathUtils.damp(this.chaserRig.root.position.z, targetZ, 4.5, dt);
-    this.chaserRig.root.position.x = THREE.MathUtils.damp(this.chaserRig.root.position.x, this.player.x, 7.5, dt);
-    this.chaserRig.root.visible = this.chaserRig.root.position.z < 9.5;
-
-    const swing = Math.sin(this.distance * 1.55 + 0.8) * (0.8 + speed * 0.005);
-    this.chaserRig.leftLeg.rotation.x = swing;
-    this.chaserRig.rightLeg.rotation.x = -swing;
-    this.chaserRig.leftArm.rotation.x = -swing;
-    this.chaserRig.rightArm.rotation.x = swing;
-  }
-
-  private updateParticles(dt: number): void {
-    for (let i = 0; i < this.particles.length; i++) {
-      const p = this.particles[i];
-      if (!p.active) continue;
-      p.life -= dt;
-      if (p.life <= 0) {
-        p.active = false;
-        _dummy.position.set(0, -50, 0);
-        _dummy.scale.set(0, 0, 0);
-        _dummy.updateMatrix();
-        this.particleMesh.setMatrixAt(i, _dummy.matrix);
-        continue;
-      }
-      p.vy -= 18 * dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.z += p.vz * dt;
-      const s = p.scale * (p.life / p.maxLife);
-      _dummy.position.set(p.x, p.y, p.z);
-      _dummy.rotation.set(p.life * 6, p.life * 4, 0);
-      _dummy.scale.set(s, s, s);
-      _dummy.updateMatrix();
-      this.particleMesh.setMatrixAt(i, _dummy.matrix);
-      this.particleMesh.setColorAt(i, p.color);
-    }
-    this.particleMesh.instanceMatrix.needsUpdate = true;
-    if (this.particleMesh.instanceColor) this.particleMesh.instanceColor.needsUpdate = true;
-  }
-
-  private updateCamera(dt: number, speed: number): void {
-    this.cameraTrauma = Math.max(0, this.cameraTrauma - dt * 1.8);
-    const shake = this.cameraTrauma * this.cameraTrauma;
-    const shakeX = (Math.random() * 2 - 1) * shake * 0.65;
-    const shakeY = (Math.random() * 2 - 1) * shake * 0.45;
-
-    const targetCamX = this.player.x * 0.62 + shakeX;
-    const rollDip = this.player.rolling ? -0.6 : 0;
-    const droneLift = this.player.droneActive ? 2.4 : 0;
-    const targetCamY = this.framing.chaseY + this.player.y * 0.62 + rollDip + droneLift + shakeY;
-    const targetCamZ = this.player.droneActive ? this.framing.chaseZ + 2.8 : this.framing.chaseZ;
-
-    this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, targetCamX, 10, dt);
-    this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, targetCamY, 9, dt);
-    this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, targetCamZ, 7, dt);
-
+    // Dynamic FOV punch on Filter Kaapi Overdrive / Headstart / Drone — only call updateProjectionMatrix when changed!
     const targetFov =
-      this.framing.fov + Math.min(9, Math.max(0, (speed - 21) * 0.28)) + (this.kaapiTimer > 0 ? 10 : 0);
-    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
-      this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 7, dt);
+      this.framing.fov +
+      (this.headstartActive ? 13 : this.kaapiTimer > 0 ? 9.5 : this.droneTimer > 0 ? 5.5 : 0);
+    const nextFov = this.currentFov + (targetFov - this.currentFov) * Math.min(1, dt * 6);
+    if (Math.abs(nextFov - this.currentFov) > 0.01) {
+      this.currentFov = nextFov;
+      this.camera.fov = nextFov;
       this.camera.updateProjectionMatrix();
     }
-
-    this.camera.lookAt(this.player.x * 0.42, 1.55 + this.player.y * 0.52, -14);
-    const targetRoll = (LANE_POSITIONS[this.player.lane] - this.player.x) * -0.025;
-    this.camera.rotation.z = THREE.MathUtils.damp(this.camera.rotation.z, targetRoll, 10, dt);
   }
 
-  private pushHud(force: boolean): void {
-    if (!force && this.elapsed - this.lastHudPush < 0.09) return;
-    this.lastHudPush = this.elapsed;
+  private buildActivePowerUpsList(): ActivePowerUpState[] {
+    this.activePowerUpsScratch.length = 0;
+    if (this.hoverboardTimer > 0) {
+      this.activePowerUpsScratch.push({
+        type: 'hoverboard',
+        remaining: this.hoverboardTimer,
+        duration: this.hoverboardDuration,
+      });
+    }
+    if (this.kaapiTimer > 0) {
+      this.activePowerUpsScratch.push({
+        type: 'kaapi',
+        remaining: this.kaapiTimer,
+        duration: this.kaapiDuration,
+      });
+    }
+    if (this.magnetTimer > 0) {
+      this.activePowerUpsScratch.push({
+        type: 'magnet',
+        remaining: this.magnetTimer,
+        duration: this.magnetDuration,
+      });
+    }
+    if (this.droneTimer > 0) {
+      this.activePowerUpsScratch.push({
+        type: 'drone',
+        remaining: this.droneTimer,
+        duration: this.droneDuration,
+      });
+    }
+    if (this.sneakersTimer > 0) {
+      this.activePowerUpsScratch.push({
+        type: 'sneakers',
+        remaining: this.sneakersTimer,
+        duration: this.sneakersDuration,
+      });
+    }
+    if (this.multiplierTimer > 0) {
+      this.activePowerUpsScratch.push({
+        type: 'multiplier',
+        remaining: this.multiplierTimer,
+        duration: this.multiplierDuration,
+      });
+    }
+    return this.activePowerUpsScratch;
+  }
 
-    const activePowerUps: ActivePowerUpState[] = [];
-    if (this.kaapiTimer > 0) activePowerUps.push({ type: 'kaapi', remaining: this.kaapiTimer, duration: this.kaapiDuration });
-    if (this.magnetTimer > 0) activePowerUps.push({ type: 'magnet', remaining: this.magnetTimer, duration: this.magnetDuration });
-    if (this.droneTimer > 0) activePowerUps.push({ type: 'drone', remaining: this.droneTimer, duration: this.droneDuration });
-    if (this.hoverboardTimer > 0) activePowerUps.push({ type: 'hoverboard', remaining: this.hoverboardTimer, duration: this.hoverboardDuration });
+  private emitLiveTick(): void {
+    if (!this.onLiveTick) return;
+    const baseMult = getEffectiveMultiplier(this.profile);
+    const multiplierBoosted = this.multiplierTimer > 0;
+    const headstartRemaining =
+      this.mode === 'playing' && !this.headstartActive
+        ? Math.max(0, HEADSTART_WINDOW - this.runTime)
+        : 0;
 
-    const maxCd = Math.max(6, HOVERBOARD_COOLDOWN - ((this.profile.upgrades.hoverboard ?? 1) - 1) * 1.4);
-    const cdRatio =
-      this.hoverboardTimer > 0
-        ? this.hoverboardTimer / Math.max(1, this.hoverboardDuration)
-        : this.hoverboardCooldown <= 0
-          ? 1
-          : Math.max(0, 1 - this.hoverboardCooldown / maxCd);
+    this.onLiveTick({
+      score: Math.round(this.score),
+      distance: Math.round(this.distance),
+      tokens: this.runTokens,
+      multiplier: multiplierBoosted ? baseMult * 2 : baseMult,
+      multiplierBoosted,
+      hoverboardReady: this.hoverboardTimer === 0 && this.hoverboardCooldown === 0 && this.droneTimer === 0,
+      hoverboardActive: this.hoverboardTimer > 0,
+      hoverboardCooldownRatio:
+        this.hoverboardTimer > 0
+          ? this.hoverboardTimer / Math.max(0.1, this.hoverboardDuration)
+          : 1 - this.hoverboardCooldown / HOVERBOARD_COOLDOWN,
+      headstartRemaining,
+      headstartActive: this.headstartActive,
+      kaapiActive: this.kaapiTimer > 0,
+      activePowerUps: this.buildActivePowerUpsList(),
+      fps: Math.round(this.currentFps),
+      drawCalls: this.currentDrawCalls,
+    });
+  }
 
+  private emitHud(): void {
+    const baseMult = getEffectiveMultiplier(this.profile);
+    const multiplierBoosted = this.multiplierTimer > 0;
     this.onHud({
       mode: this.mode,
       score: Math.round(this.score),
       distance: Math.round(this.distance),
       tokens: this.runTokens,
-      multiplier: getEffectiveMultiplier(this.profile),
+      multiplier: multiplierBoosted ? baseMult * 2 : baseMult,
+      multiplierBoosted,
       zone: this.zone,
       weather: this.weather,
-      currentStation: this.activeStationBanner,
-      stationBannerVisible: this.stationBannerTimer > 0 && this.activeStationBanner !== null,
-      activePowerUps,
-      hoverboardReady: this.hoverboardTimer <= 0 && this.hoverboardCooldown <= 0,
-      hoverboardCooldownRatio: cdRatio,
+      currentStation: this.currentStation,
+      stationBannerVisible: this.stationBannerTimer > 0 && this.currentStation !== null,
+      activePowerUps: this.buildActivePowerUpsList().map((p) => ({ ...p })),
+      hoverboardReady: this.hoverboardTimer === 0 && this.hoverboardCooldown === 0 && this.droneTimer === 0,
+      hoverboardCooldownRatio:
+        this.hoverboardTimer > 0
+          ? this.hoverboardTimer / Math.max(0.1, this.hoverboardDuration)
+          : 1 - this.hoverboardCooldown / HOVERBOARD_COOLDOWN,
       hoverboardActive: this.hoverboardTimer > 0,
       kaapiActive: this.kaapiTimer > 0,
+      headstartActive: this.headstartActive,
+      headstartAvailable: this.mode === 'playing' && !this.headstartActive && this.runTime < HEADSTART_WINDOW,
       chaserClose: this.chaserTimer > 0,
       callout: this.callout,
-      voiceOver: this.activeVoiceOver,
+      voiceOver: this.voiceOver,
       lastStationName: this.lastStationName,
       gameOverQuip: this.gameOverQuip,
       runSummary: this.runSummary,
     });
   }
 
-  private afterDraw(cb: () => void): void {
-    const gl = this.renderer.getContext() as WebGL2RenderingContext;
-    if (typeof gl.fenceSync === 'function') {
-      const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-      gl.flush();
-      const poll = () => {
-        if (this.disposed) return;
-        const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
-        if (state === gl.UNSIGNALED) {
-          this.frameHandle = window.setTimeout(poll, 5);
-        } else {
-          if (sync) gl.deleteSync(sync);
-          this.frameHandle = window.setTimeout(cb, 80);
-        }
-      };
-      this.frameHandle = window.setTimeout(poll, 5);
-    } else {
-      this.frameHandle = window.setTimeout(cb, 80);
+  private updateAdaptiveResolution(frameDt: number): void {
+    if (frameDt <= 0.0005) return;
+    const instantFps = Math.min(240, 1 / frameDt);
+    this.fpsSamples[this.fpsSampleIdx] = instantFps;
+    this.fpsSampleIdx = (this.fpsSampleIdx + 1) % this.fpsSamples.length;
+    if (this.fpsSampleCount < this.fpsSamples.length) this.fpsSampleCount++;
+
+    let sum = 0;
+    for (let i = 0; i < this.fpsSampleCount; i++) sum += this.fpsSamples[i];
+    this.currentFps = sum / Math.max(1, this.fpsSampleCount);
+
+    if (this.isSoftwareGl || this.mode !== 'playing') return;
+    if (this.adaptiveCooldown > 0) {
+      this.adaptiveCooldown -= frameDt;
+      return;
+    }
+    if (this.fpsSampleCount >= 30 && this.currentFps < 50 && this.adaptiveQualityStep < 2) {
+      this.adaptiveQualityStep++;
+      this.adaptiveCooldown = 4.0;
+      this.applyQualitySettings(this.currentQuality);
     }
   }
 
-  private startLoop(): void {
-    const tick = () => {
-      if (this.disposed) return;
-      const now = performance.now();
-      const rawDt = Math.max(0.001, (now - this.lastTs) / 1000);
-      this.lastTs = now;
+  private loop = (nowMs: number): void => {
+    if (this.disposed) return;
 
-      if (!this.contextLost) {
-        this.stepSimulation(rawDt);
-        this.renderer.render(this.scene, this.camera);
-      }
+    const rawDt = Math.max(0, (nowMs - this.lastFrameMs) / 1000);
+    this.lastFrameMs = nowMs;
+    const frameDt = Math.min(rawDt, MAX_FRAME_DT);
+    this.time += frameDt;
+    this.updateAdaptiveResolution(rawDt > 0 ? rawDt : 1 / 60);
 
-      if (this.isSoftwareGl) {
-        this.afterDraw(tick);
-      } else {
-        this.frameHandle = window.requestAnimationFrame(tick);
+    // Banner / toast / voice-over UI timers
+    let hudEventChanged = false;
+    if (this.stationBannerTimer > 0) {
+      this.stationBannerTimer = Math.max(0, this.stationBannerTimer - frameDt);
+      if (this.stationBannerTimer === 0) hudEventChanged = true;
+    }
+    if (this.calloutTimer > 0) {
+      this.calloutTimer = Math.max(0, this.calloutTimer - frameDt);
+      if (this.calloutTimer === 0) {
+        this.callout = null;
+        hudEventChanged = true;
       }
-    };
-    this.frameHandle = window.requestAnimationFrame(tick);
-  }
+    }
+    if (this.voiceOverTimer > 0) {
+      this.voiceOverTimer = Math.max(0, this.voiceOverTimer - frameDt);
+      if (this.voiceOverTimer === 0) {
+        this.voiceOver = null;
+        hudEventChanged = true;
+      }
+    }
+
+    // Clamped fixed-timestep accumulator (120Hz physics) for zero-judder 60–144Hz monitors!
+    let alpha = 1;
+    if (this.mode === 'playing') {
+      this.accumulator += frameDt;
+      let steps = 0;
+      while (this.accumulator >= FIXED_DT && steps < 6) {
+        this.stepFixedSimulation(FIXED_DT);
+        this.accumulator -= FIXED_DT;
+        steps++;
+        if (this.mode !== 'playing') {
+          this.accumulator = 0;
+          break;
+        }
+      }
+      alpha = Math.min(1, this.accumulator / FIXED_DT);
+    } else if (this.mode === 'gameover') {
+      this.pools.updateSparks(frameDt, 0);
+      this.pools.updateShockwave(frameDt);
+    }
+
+    this.updateVisuals(frameDt, alpha);
+    this.renderer.render(this.scene, this.camera);
+    this.currentDrawCalls = this.renderer.info.render.calls;
+
+    // Push live counters straight to DOM refs every frame without React re-renders!
+    if (this.mode === 'playing') {
+      this.emitLiveTick();
+    }
+
+    // Low-frequency structural HUD sync (only when discrete flags or banners change, or 2Hz safety check)
+    this.hudSyncTimer += frameDt;
+    if (hudEventChanged || (this.mode === 'playing' && this.hudSyncTimer >= 0.5)) {
+      this.hudSyncTimer = 0;
+      this.emitHud();
+    }
+
+    if (this.isSoftwareGl) {
+      this.rafId = window.setTimeout(() => this.loop(performance.now()), 120) as unknown as number;
+    } else {
+      this.rafId = requestAnimationFrame(this.loop);
+    }
+  };
 
   private handleResize(): void {
     if (this.disposed) return;
-    const w = Math.max(1, this.container.clientWidth || window.innerWidth);
-    const h = Math.max(1, this.container.clientHeight || window.innerHeight);
-    this.framing = computeCameraFraming(w, h);
-    this.camera.aspect = w / h;
-    if (this.mode === 'title') {
-      this.camera.fov = this.framing.fov;
-    }
+    const width = Math.max(this.container.clientWidth, 1);
+    const height = Math.max(this.container.clientHeight, 1);
+    this.framing = computeCameraFraming(width, height);
+    this.camera.aspect = width / height;
+    this.camera.fov = this.framing.fov;
+    this.currentFov = this.framing.fov;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(w, h);
-    if (!this.contextLost) {
-      this.renderer.render(this.scene, this.camera);
-    }
+    this.renderer.setSize(width, height, false);
   }
 
   public dispose(): void {
     this.disposed = true;
-    window.cancelAnimationFrame(this.frameHandle);
-    window.clearTimeout(this.frameHandle);
-    window.removeEventListener('resize', this.onWindowResizeBound);
-    window.removeEventListener('orientationchange', this.onWindowResizeBound);
-    this.resizeObserver?.disconnect();
-    this.clearDynamicEntities();
+    if (this.rafId !== null) {
+      if (this.isSoftwareGl) {
+        window.clearTimeout(this.rafId);
+      } else {
+        cancelAnimationFrame(this.rafId);
+      }
+      this.rafId = null;
+    }
+    window.removeEventListener('resize', this.boundOnResize);
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+    this.renderer.domElement.removeEventListener('webglcontextlost', this.boundOnContextLost);
+    this.renderer.domElement.removeEventListener('webglcontextrestored', this.boundOnContextRestored);
+
+    this.pools.dispose();
+    this.assets.dispose();
+    this.skyDome.dispose();
     this.textures.dispose();
+    disposeObject3D(this.runnerRig.root);
+    disposeObject3D(this.chaserRig.root);
     this.renderer.dispose();
-    if (this.renderer.domElement.parentNode === this.container) {
+    if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);
     }
   }

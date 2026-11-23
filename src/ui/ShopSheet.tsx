@@ -3,6 +3,7 @@ import { Check, Lock, X, Zap, Trophy } from 'lucide-react';
 import {
   CHARACTERS,
   HOVERBOARDS,
+  PERK_LABELS,
   UPGRADES,
   type CharacterId,
   type HoverboardId,
@@ -20,6 +21,8 @@ import {
   DroneIcon,
   KaapiIcon,
   MetroTokenIcon,
+  Multiplier2xIcon,
+  SuperSneakersIcon,
 } from './Icons';
 
 export type ShopTab = 'characters' | 'hoverboards' | 'upgrades' | 'missions';
@@ -56,6 +59,8 @@ export function ShopSheet({
     if (key === 'kaapi') return <KaapiIcon className="w-7 h-7" />;
     if (key === 'magnet') return <DosaMagnetIcon className="w-7 h-7" />;
     if (key === 'drone') return <DroneIcon className="w-7 h-7" />;
+    if (key === 'sneakers') return <SuperSneakersIcon className="w-7 h-7" />;
+    if (key === 'multiplier') return <Multiplier2xIcon className="w-7 h-7" />;
     return <AutoBoardIcon className="w-7 h-7" />;
   };
 
@@ -215,10 +220,22 @@ export function ShopSheet({
                       <AutoBoardIcon className="w-7 h-7" />
                     </div>
                     <div className="min-w-0">
-                      <div className="font-display text-sm sm:text-base text-white truncate">
-                        {board.name}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-display text-sm sm:text-base text-white truncate">
+                          {board.name}
+                        </span>
+                        <span
+                          className="px-1.5 py-0.5 rounded-md border font-display text-[10px] tracking-wide"
+                          style={{
+                            borderColor: PERK_LABELS[board.perk].color,
+                            color: PERK_LABELS[board.perk].color,
+                            backgroundColor: 'rgba(26, 20, 35, 0.85)',
+                          }}
+                        >
+                          {PERK_LABELS[board.perk].name}
+                        </span>
                       </div>
-                      <div className="text-xs text-white/70 leading-snug">
+                      <div className="text-xs text-white/70 leading-snug mt-0.5">
                         {board.tagline}
                       </div>
                     </div>

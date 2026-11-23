@@ -1,4 +1,12 @@
-export type VoiceOverEvent = 'run_start' | 'kaapi' | 'magnet' | 'drone' | 'hoverboard';
+export type VoiceOverEvent =
+  | 'run_start'
+  | 'kaapi'
+  | 'magnet'
+  | 'drone'
+  | 'hoverboard'
+  | 'sneakers'
+  | 'multiplier'
+  | 'mystery_box';
 
 export interface VoiceOverPhrase {
   id: string;
@@ -153,11 +161,11 @@ export const KANNADA_VOICE_OVER_PHRASES: Record<VoiceOverEvent, VoiceOverPhrase[
     {
       id: 'magnet_dosa_banni',
       event: 'magnet',
-      romanized: 'Sakkath dosa magnet, banni!',
-      kannada: 'ಸಕ್ಕತ್ ದೋಸೆ ಮ್ಯಾಗ್ನೆಟ್, ಬನ್ನಿ!',
-      meaning: 'Awesome dosa magnet, come here!',
-      spokenKn: 'ಸಕ್ಕತ್ ದೋಸೆ ಮ್ಯಾಗ್ನೆಟ್, ಬನ್ನಿ!',
-      spokenEnIn: 'Sakkath dosa magnet, banni!',
+      romanized: 'UPI magnet on, banni!',
+      kannada: 'ಯುಪಿಐ ಮ್ಯಾಗ್ನೆಟ್ ಆನ್, ಬನ್ನಿ!',
+      meaning: 'UPI magnet active, come here!',
+      spokenKn: 'ಯುಪಿಐ ಮ್ಯಾಗ್ನೆಟ್ ಆನ್, ಬನ್ನಿ!',
+      spokenEnIn: 'UPI magnet on, banni!',
       pitch: 1.12,
       rate: 1.08,
     },
@@ -265,6 +273,144 @@ export const KANNADA_VOICE_OVER_PHRASES: Record<VoiceOverEvent, VoiceOverPhrase[
       rate: 1.08,
     },
   ],
+  sneakers: [
+    {
+      id: 'sneakers_jump_high',
+      event: 'sneakers',
+      romanized: 'Oh, nodi! Super Jump!',
+      kannada: 'ಓಹ್, ನೋಡಿ! ಸೂಪರ್ ಜಂಪ್!',
+      meaning: 'Look! Super Jump!',
+      spokenKn: 'ಓಹ್, ನೋಡಿ! ಸೂಪರ್ ಜಂಪ್!',
+      spokenEnIn: 'Oh, nodi! Super Jump!',
+      pitch: 1.16,
+      rate: 1.1,
+    },
+    {
+      id: 'sneakers_train_roof',
+      event: 'sneakers',
+      romanized: 'Train mele haaru, guru!',
+      kannada: 'ಟ್ರೈನ್ ಮೇಲೆ ಹಾರು, ಗುರು!',
+      meaning: 'Leap onto the train roof, guru!',
+      spokenKn: 'ಟ್ರೈನ್ ಮೇಲೆ ಹಾರು, ಗುರು!',
+      spokenEnIn: 'Train mele haaru, guru!',
+      pitch: 1.12,
+      rate: 1.08,
+    },
+    {
+      id: 'sneakers_spring_boots',
+      event: 'sneakers',
+      romanized: 'Spring shoes full power!',
+      kannada: 'ಸ್ಪ್ರಿಂಗ್ ಶೂಸ್ ಫುಲ್ ಪವರ್!',
+      meaning: 'Spring sneakers full power!',
+      spokenKn: 'ಸ್ಪ್ರಿಂಗ್ ಶೂಸ್ ಫುಲ್ ಪವರ್!',
+      spokenEnIn: 'Spring shoes full power!',
+      pitch: 1.14,
+      rate: 1.1,
+    },
+    {
+      id: 'sneakers_sakkath_bounce',
+      event: 'sneakers',
+      romanized: 'Sakkath bounce, macha!',
+      kannada: 'ಸಕ್ಕತ್ ಬೌನ್ಸ್, ಮಚ್ಚಾ!',
+      meaning: 'Awesome bounce, buddy!',
+      spokenKn: 'ಸಕ್ಕತ್ ಬೌನ್ಸ್, ಮಚ್ಚಾ!',
+      spokenEnIn: 'Sakkath bounce, macha!',
+      pitch: 1.12,
+      rate: 1.08,
+    },
+  ],
+  multiplier: [
+    {
+      id: 'mult_double_dhamaka',
+      event: 'multiplier',
+      romanized: 'Double score, full dhamaka!',
+      kannada: 'ಡಬಲ್ ಸ್ಕೋರ್, ಫುಲ್ ಧಮಾಕಾ!',
+      meaning: 'Double score, full blast!',
+      spokenKn: 'ಡಬಲ್ ಸ್ಕೋರ್, ಫುಲ್ ಧಮಾಕಾ!',
+      spokenEnIn: 'Double score, full dhamaka!',
+      pitch: 1.15,
+      rate: 1.1,
+    },
+    {
+      id: 'mult_2x_guru',
+      event: 'multiplier',
+      romanized: 'Oh, nodi! 2x meter on!',
+      kannada: 'ಓಹ್, ನೋಡಿ! 2x ಮೀಟರ್ ಆನ್!',
+      meaning: 'Look! 2x meter active!',
+      spokenKn: 'ಓಹ್, ನೋಡಿ! 2x ಮೀಟರ್ ಆನ್!',
+      spokenEnIn: 'Oh, nodi! 2x meter on!',
+      pitch: 1.14,
+      rate: 1.08,
+    },
+    {
+      id: 'mult_points_rain',
+      event: 'multiplier',
+      romanized: 'Points male bartide, guru!',
+      kannada: 'ಪಾಯಿಂಟ್ಸ್ ಮಳೆ ಬರ್ತಿದೆ, ಗುರು!',
+      meaning: 'It is raining points, guru!',
+      spokenKn: 'ಪಾಯಿಂಟ್ಸ್ ಮಳೆ ಬರ್ತಿದೆ, ಗುರು!',
+      spokenEnIn: 'Points male bartide, guru!',
+      pitch: 1.12,
+      rate: 1.08,
+    },
+    {
+      id: 'mult_super_record',
+      event: 'multiplier',
+      romanized: 'Record break maadu, macha!',
+      kannada: 'ರೆಕಾರ್ಡ್ ಬ್ರೇಕ್ ಮಾಡು, ಮಚ್ಚಾ!',
+      meaning: 'Break the record, buddy!',
+      spokenKn: 'ರೆಕಾರ್ಡ್ ಬ್ರೇಕ್ ಮಾಡು, ಮಚ್ಚಾ!',
+      spokenEnIn: 'Record break maadu, macha!',
+      pitch: 1.12,
+      rate: 1.1,
+    },
+  ],
+  mystery_box: [
+    {
+      id: 'mystery_jackpot',
+      event: 'mystery_box',
+      romanized: 'Mystery Box! Jackpot guru!',
+      kannada: 'ಮಿಸ್ಟರಿ ಬಾಕ್ಸ್! ಜಾಕ್‌ಪಾಟ್ ಗುರು!',
+      meaning: 'Mystery Box! Jackpot guru!',
+      spokenKn: 'ಮಿಸ್ಟರಿ ಬಾಕ್ಸ್! ಜಾಕ್‌ಪಾಟ್ ಗುರು!',
+      spokenEnIn: 'Mystery Box! Jackpot guru!',
+      pitch: 1.18,
+      rate: 1.08,
+    },
+    {
+      id: 'mystery_surprise',
+      event: 'mystery_box',
+      romanized: 'Oh, nodi! Bumper gift!',
+      kannada: 'ಓಹ್, ನೋಡಿ! ಬಂಪರ್ ಗಿಫ್ಟ್!',
+      meaning: 'Look! Bumper gift!',
+      spokenKn: 'ಓಹ್, ನೋಡಿ! ಬಂಪರ್ ಗಿಫ್ಟ್!',
+      spokenEnIn: 'Oh, nodi! Bumper gift!',
+      pitch: 1.16,
+      rate: 1.08,
+    },
+    {
+      id: 'mystery_lucky',
+      event: 'mystery_box',
+      romanized: 'Sakkath lucky, macha!',
+      kannada: 'ಸಕ್ಕತ್ ಲಕ್ಕಿ, ಮಚ್ಚಾ!',
+      meaning: 'Super lucky, buddy!',
+      spokenKn: 'ಸಕ್ಕತ್ ಲಕ್ಕಿ, ಮಚ್ಚಾ!',
+      spokenEnIn: 'Sakkath lucky, macha!',
+      pitch: 1.14,
+      rate: 1.06,
+    },
+    {
+      id: 'mystery_bonus',
+      event: 'mystery_box',
+      romanized: 'Special bonus sigtu!',
+      kannada: 'ಸ್ಪೆಷಲ್ ಬೋನಸ್ ಸಿಗ್ತು!',
+      meaning: 'Special bonus unlocked!',
+      spokenKn: 'ಸ್ಪೆಷಲ್ ಬೋನಸ್ ಸಿಗ್ತು!',
+      spokenEnIn: 'Special bonus sigtu!',
+      pitch: 1.12,
+      rate: 1.06,
+    },
+  ],
 };
 
 /**
@@ -285,13 +431,6 @@ export function pickVoiceOverPhrase(
   return candidates[idx] ?? pool[0];
 }
 
-/**
- * Ranks available browser SpeechSynthesis voices for Kannada / Bengaluru delivery:
- * 1. Native Kannada (`kn-IN` / `kn`)
- * 2. Indian English (`en-IN`) — pronounces Romanized Kannada naturally
- * 3. Any English voice (`en-*`)
- * 4. Browser default or first available voice
- */
 export function selectPreferredSpeechVoice<T extends SpeechVoiceDescriptor>(
   voices: readonly T[],
 ): T | null {
@@ -314,10 +453,6 @@ export function selectPreferredSpeechVoice<T extends SpeechVoiceDescriptor>(
   return voices.find((v) => v.default) ?? voices[0];
 }
 
-/**
- * Matches spoken script to the selected voice so non-Kannada TTS engines never go
- * silent on Kannada Unicode, while true `kn-IN` voices speak native Kannada script.
- */
 export function getSpeechPayload(
   phrase: VoiceOverPhrase,
   voice: SpeechVoiceDescriptor | null,
